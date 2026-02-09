@@ -6,7 +6,7 @@ long_description = readme.read_text(encoding='utf-8') if readme.exists() else ""
 
 setup(
     name="litparser",
-    version="0.6.2",
+    version="0.7.0",
     description="Lightweight Document Parser - 순수 Python으로 PDF, DOCX, PPTX, HWPX 파싱",
     long_description=long_description,
     long_description_content_type="text/markdown",

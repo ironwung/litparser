@@ -43,7 +43,7 @@ from .core.struct_tree import (
 )
 import re
 
-__version__ = '0.6.2'
+__version__ = '0.7.0'
 __all__ = [
     # 통합 API
     'parse', 'to_markdown', 'to_json', 'ParseResult',
