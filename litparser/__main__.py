@@ -50,7 +50,8 @@ def main():
         sys.exit(1)
     
     ext = filepath.suffix.lower()
-    if ext not in ['.pdf', '.docx', '.pptx', '.hwpx', '.xlsx', '.txt', '.md', '.markdown']:
+    supported = ['.pdf', '.docx', '.pptx', '.xlsx', '.hwpx', '.hwp', '.doc', '.ppt', '.xls', '.txt', '.md', '.markdown']
+    if ext not in supported:
         print(f"오류: 지원하지 않는 포맷: {ext}", file=sys.stderr)
         sys.exit(1)
     

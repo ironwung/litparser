@@ -18,6 +18,7 @@ from .struct_tree import (
     StructTreeParser, StructElement, StructTable, StructType,
     extract_tables_from_struct_tree, is_tagged_pdf
 )
+from .ole_parser import OLE2Reader, is_ole2_file
 
 __all__ = [
     # Parser
@@ -35,4 +36,6 @@ __all__ = [
     # Struct Tree
     'StructTreeParser', 'StructElement', 'StructTable', 'StructType',
     'extract_tables_from_struct_tree', 'is_tagged_pdf',
+    # OLE2
+    'OLE2Reader', 'is_ole2_file',
 ]

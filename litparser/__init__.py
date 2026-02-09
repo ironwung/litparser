@@ -43,7 +43,7 @@ from .core.struct_tree import (
 )
 import re
 
-__version__ = '0.5.3'
+__version__ = '0.6.2'
 __all__ = [
     # 통합 API
     'parse', 'to_markdown', 'to_json', 'ParseResult',
@@ -290,6 +290,25 @@ def parse(
                     img_data['base64'] = base64.b64encode(img.data).decode('ascii')
                 result.images.append(img_data)
     
+    # HWP (바이너리)
+    elif ext == '.hwp':
+        from .formats.hwp_parser import parse_hwp
+        doc = parse_hwp(filepath_or_bytes)
+        result._doc = doc
+        result.title = doc.title
+        result.author = doc.author
+        result.page_count = 1
+        result.text = doc.get_text()
+        result.headings = [{'level': lv, 'text': txt} for lv, txt in doc.get_headings()]
+        
+        for t in doc.tables:
+            result.tables.append({
+                'rows': len(t.rows),
+                'cols': len(t.rows[0]) if t.rows else 0,
+                'data': t.rows,
+                'markdown': t.to_markdown(),
+            })
+    
     # XLSX
     elif ext == '.xlsx':
         from .formats.xlsx_parser import parse_xlsx
@@ -338,6 +357,108 @@ def parse(
         if is_md and doc.headings:
             result.headings = [{'level': lv, 'text': txt} for lv, txt in doc.headings]
     
+    # DOC (Word 97-2003)
+    elif ext == '.doc':
+        from .formats.doc_parser import parse_doc
+        doc = parse_doc(filepath_or_bytes)
+        result._doc = doc
+        result.title = doc.title
+        result.author = doc.author
+        result.page_count = 1
+        result.text = doc.get_text()
+        result.headings = [{'level': lv, 'text': txt} for lv, txt in doc.get_headings()]
+        
+        for t in doc.tables:
+            result.tables.append({
+                'rows': len(t.rows),
+                'cols': len(t.rows[0]) if t.rows else 0,
+                'data': t.rows,
+                'markdown': t.to_markdown(),
+            })
+    
+    # PPT (PowerPoint 97-2003)
+    elif ext == '.ppt':
+        from .formats.ppt_parser import parse_ppt
+        doc = parse_ppt(filepath_or_bytes)
+        result._doc = doc
+        result.title = doc.title
+        result.author = doc.author
+        result.page_count = doc.slide_count
+        result.text = doc.get_text()
+        
+        for slide in doc.slides:
+            page_data = {
+                'page': slide.number,
+                'title': slide.title,
+                'text': slide.get_text(),
+                'tables': [],
+            }
+            result.pages.append(page_data)
+            
+            if slide.title:
+                result.headings.append({'level': 1, 'text': slide.title})
+        
+        if include_images:
+            for img in doc.images:
+                img_data = {
+                    'filename': img.filename,
+                    'format': img.content_type,
+                }
+                if img.data:
+                    img_data['base64'] = base64.b64encode(img.data).decode('ascii')
+                result.images.append(img_data)
+    
+    # XLS (Excel 97-2003)
+    elif ext == '.xls':
+        from .formats.xls_parser import parse_xls
+        doc = parse_xls(filepath_or_bytes)
+        result._doc = doc
+        result.title = doc.title
+        result.author = doc.author
+        result.page_count = doc.sheet_count
+        result.text = doc.get_text()
+        
+        for sheet in doc.sheets:
+            page_data = {
+                'page': sheet.index + 1,
+                'name': sheet.name,
+                'text': sheet.get_text(),
+                'tables': [],
+            }
+            
+            if sheet.cells:
+                table_data = {
+                    'name': sheet.name,
+                    'rows': sheet.rows,
+                    'cols': sheet.cols,
+                    'data': sheet.to_list(),
+                    'markdown': sheet.to_markdown(),
+                }
+                page_data['tables'].append(table_data)
+                result.tables.append(table_data)
+            
+            result.pages.append(page_data)
+            result.headings.append({'level': 1, 'text': sheet.name})
+    
+    # HWP (한글 5.0 바이너리)
+    elif ext == '.hwp':
+        from .formats.hwp_parser import parse_hwp
+        doc = parse_hwp(filepath_or_bytes)
+        result._doc = doc
+        result.title = doc.title
+        result.author = doc.author
+        result.page_count = 1
+        result.text = doc.get_text()
+        result.headings = [{'level': lv, 'text': txt} for lv, txt in doc.get_headings()]
+        
+        for t in doc.tables:
+            result.tables.append({
+                'rows': len(t.rows),
+                'cols': len(t.rows[0]) if t.rows else 0,
+                'data': t.rows,
+                'markdown': t.to_markdown(),
+            })
+    
     else:
         raise ValueError(f"지원하지 않는 포맷: {ext}")
     
@@ -367,6 +488,27 @@ def _detect_format(data: bytes) -> str:
                 return '.xlsx'
             if any('Contents/' in n for n in names):
                 return '.hwpx'
+        except:
+            pass
+    
+    # OLE2 (doc, ppt, xls, hwp)
+    if data[:8] == b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1':
+        from .core.ole_parser import OLE2Reader
+        try:
+            ole = OLE2Reader(data)
+            streams = ole.list_all()
+            
+            if 'WordDocument' in streams:
+                return '.doc'
+            if 'PowerPoint Document' in streams:
+                return '.ppt'
+            if 'Workbook' in streams or 'Book' in streams:
+                return '.xls'
+            if 'FileHeader' in streams:
+                # HWP 확인
+                header = ole.get_stream('FileHeader')
+                if header and header[:17].decode('utf-8', errors='ignore').startswith('HWP'):
+                    return '.hwp'
         except:
             pass
     
