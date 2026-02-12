@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "litparser"
+version = "0.7.0"
+description = "Lightweight Document Parser - 순수 Python으로 PDF, DOCX, PPTX, HWPX 파싱"
+readme = "README.md"
+license = "MIT"
+authors = [
+    {name = "ironwung", email = "ironwung@gmail.com"}
+]
+keywords = ["pdf", "parser", "docx", "pptx", "xlsx", "hwpx", "document", "text-extraction", "lightweight"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Text Processing",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.8"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ironwung/litparser"
+Documentation = "https://github.com/ironwung/litparser#readme"
+Repository = "https://github.com/ironwung/litparser"
+
+[project.scripts]
+litparser = "litparser.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["litparser", "litparser.*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
