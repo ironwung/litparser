@@ -1,6 +1,6 @@
 # LitParser
 
-**Lit**eweight Document **Parser** - 순수 Python 문서 파서
+**LIT** Document **Parser** - 순수 Python 문서 파서
 
 **외부 라이브러리 없이** 다양한 문서 포맷 파싱
 
