@@ -6,14 +6,14 @@ long_description = readme.read_text(encoding='utf-8') if readme.exists() else ""
 
 setup(
     name="litparser",
-    version="0.7.0",
+    version="0.9.0",
     description="Lightweight Document Parser - 순수 Python으로 PDF, DOCX, PPTX, HWPX 파싱",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="ironwung",
     author_email="ironwung@gmail.com",
     url="https://github.com/ironwung/litparser",
-    license="MIT",
+    license="AGPL-3.0-or-later",
     
     packages=find_packages(),
     
@@ -29,7 +29,7 @@ setup(
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
         "Topic :: Text Processing",
