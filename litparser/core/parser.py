@@ -467,8 +467,9 @@ class PDFParser:
         
         # 스트림 디코딩
         filters = xref_dict.get('Filter', [])
+        decode_parms = xref_dict.get('DecodeParms', {})
         if filters:
-            stream_data = StreamDecoder.decode(xref_dict['_stream_data'], filters)
+            stream_data = StreamDecoder.decode(xref_dict['_stream_data'], filters, decode_parms)
         else:
             stream_data = xref_dict['_stream_data']
         

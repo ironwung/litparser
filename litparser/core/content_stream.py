@@ -511,7 +511,7 @@ class ContentStreamParser:
             ))
     
     def _decode_text(self, raw_bytes: bytes, is_hex: bool = False) -> str:
-        """바이트를 텍스트로 디코딩 (ASCII 우선)"""
+        """바이트를 텍스트로 디코딩"""
         if not raw_bytes:
             return ""
         
@@ -520,43 +520,22 @@ class ContentStreamParser:
         if font_info and font_info.to_unicode:
             return self._decode_with_cmap(raw_bytes, font_info.to_unicode)
         
-        # ASCII 우선: 모든 바이트가 printable ASCII면 그대로 사용
-        if all(0x20 <= b <= 0x7E or b in (0x09, 0x0A, 0x0D) for b in raw_bytes):
-            return raw_bytes.decode('ascii')
+        # Identity-H/V 인코딩: 2바이트 = Unicode 코드포인트 (UTF-16BE)
+        if font_info and font_info.encoding in ('Identity-H', 'Identity-V'):
+            if len(raw_bytes) >= 2 and len(raw_bytes) % 2 == 0:
+                try:
+                    return raw_bytes.decode('utf-16-be')
+                except:
+                    pass
         
-        # Hex 문자열이고 2바이트 단위일 때
+        # Hex 문자열이고 2바이트 단위면 UTF-16BE 시도
         if is_hex and len(raw_bytes) >= 2 and len(raw_bytes) % 2 == 0:
-            # 2바이트씩 확인: 둘 다 ASCII면 2개 문자로 처리
-            result = []
-            all_ascii = True
-            for i in range(0, len(raw_bytes), 2):
-                high, low = raw_bytes[i], raw_bytes[i+1]
-                if 0x20 <= high <= 0x7E and 0x20 <= low <= 0x7E:
-                    result.append(chr(high) + chr(low))
-                else:
-                    all_ascii = False
-                    break
-            
-            if all_ascii:
-                return ''.join(result)
-            
-            # BOM 체크 후 UTF-16BE 시도
             try:
+                # BOM 체크
                 if raw_bytes[:2] == b'\xfe\xff':
                     return raw_bytes[2:].decode('utf-16-be')
-                decoded = raw_bytes.decode('utf-16-be')
-                # 결과가 한자 범위면 ASCII로 다시 시도
-                if any(0x4E00 <= ord(c) <= 0x9FFF for c in decoded):
-                    # 원래 바이트들이 ASCII면 그걸 사용
-                    ascii_result = []
-                    for i in range(0, len(raw_bytes), 2):
-                        h, l = raw_bytes[i], raw_bytes[i+1]
-                        if 0x20 <= h <= 0x7E and 0x20 <= l <= 0x7E:
-                            ascii_result.append(chr(h) + chr(l))
-                        else:
-                            ascii_result.append(decoded[i//2])
-                    return ''.join(ascii_result)
-                return decoded
+                # 일반 UTF-16BE 시도
+                return raw_bytes.decode('utf-16-be')
             except:
                 pass
         
@@ -603,58 +582,6 @@ class FontInfo:
     to_unicode: Dict[int, str] = field(default_factory=dict)  # GID → 유니코드
 
 
-def _decode_cmap_value(hex_str: str) -> str:
-    """
-    CMap 값을 유니코드 문자열로 변환
-    ASCII 범위 바이트는 개별 문자로, 그 외는 UTF-16-BE로 해석
-    """
-    try:
-        dst_bytes = bytes.fromhex(hex_str)
-        
-        # 모든 바이트가 printable ASCII 범위(0x20-0x7E)이면 개별 문자로
-        if all(0x20 <= b <= 0x7E for b in dst_bytes):
-            return ''.join(chr(b) for b in dst_bytes)
-        
-        # 2바이트이고 UTF-16-BE로 해석 가능하면 (단, 결과가 한자면 ASCII 시도)
-        if len(dst_bytes) == 2:
-            # 먼저 개별 바이트가 ASCII인지 확인
-            high, low = dst_bytes[0], dst_bytes[1]
-            if 0x20 <= high <= 0x7E and 0x20 <= low <= 0x7E:
-                return chr(high) + chr(low)
-            
-            # UTF-16-BE로 해석
-            try:
-                char = dst_bytes.decode('utf-16-be')
-                # 한자 범위(U+4E00-U+9FFF) 또는 이상한 문자면 ASCII 시도
-                if len(char) == 1 and 0x4E00 <= ord(char) <= 0x9FFF:
-                    # 실제로 2바이트 ASCII일 가능성 높음
-                    if 0x20 <= high <= 0x7E and 0x20 <= low <= 0x7E:
-                        return chr(high) + chr(low)
-                return char
-            except:
-                pass
-        
-        # 4바이트 이상이면 2바이트씩 처리
-        if len(dst_bytes) >= 2 and len(dst_bytes) % 2 == 0:
-            result = []
-            for i in range(0, len(dst_bytes), 2):
-                high, low = dst_bytes[i], dst_bytes[i+1]
-                if 0x20 <= high <= 0x7E and 0x20 <= low <= 0x7E:
-                    result.append(chr(high) + chr(low))
-                else:
-                    try:
-                        char = dst_bytes[i:i+2].decode('utf-16-be')
-                        result.append(char)
-                    except:
-                        result.append('?')
-            return ''.join(result)
-        
-        # 기본: 바이트를 문자로
-        return ''.join(chr(b) if b < 256 else '?' for b in dst_bytes)
-    except:
-        return ''
-
-
 def parse_tounicode_cmap(cmap_data: bytes) -> Dict[int, str]:
     """
     ToUnicode CMap 파싱
@@ -684,9 +611,13 @@ def parse_tounicode_cmap(cmap_data: bytes) -> Dict[int, str]:
         for src, dst in pairs:
             try:
                 src_code = int(src, 16)
-                dst_char = _decode_cmap_value(dst)
-                if dst_char:
-                    result[src_code] = dst_char
+                # dst를 유니코드 문자열로 변환
+                dst_bytes = bytes.fromhex(dst)
+                if len(dst_bytes) == 2:
+                    dst_char = dst_bytes.decode('utf-16-be')
+                else:
+                    dst_char = ''.join(chr(b) for b in dst_bytes)
+                result[src_code] = dst_char
             except:
                 pass
     
