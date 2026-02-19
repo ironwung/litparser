@@ -904,24 +904,136 @@ def _detect_coordinate_direction(text_items: list) -> bool:
     return vote_bottom_up > vote_top_down
 
 
+def _clean_punctuation_spacing(text: str) -> str:
+    """
+    PDF 텍스트 추출 후 구두점/기호 주위의 불필요한 공백을 정리
+    
+    한글 PDF에서 각 텍스트 아이템이 후행 공백을 포함하여
+    구두점 앞에 불필요한 공백이 생기는 문제를 해결
+    """
+    import re
+    
+    # 1. 구두점 앞 공백 제거: "했다 ." → "했다."  "법무부 ," → "법무부,"
+    text = re.sub(r' ([,.\!?;:])', r'\1', text)
+    
+    # 2. 닫는 괄호/따옴표 류 앞 공백 제거: "시행계획 」" → "시행계획」"
+    text = re.sub(r' ([」\)）\]】』"\'\'`」])', r'\1', text)
+    
+    # 3. 여는 괄호/따옴표 류 뒤 공백 제거: 「 '26년 → 「'26년  ( 이하 → (이하
+    text = re.sub(r'([「\(（\[【『"\'\'`]]) ', r'\1', text)
+    
+    # 4. 가운뎃점(·) 앞뒤 공백 제거: "수립 ·의결" → "수립·의결"
+    text = re.sub(r' ·', '·', text)
+    text = re.sub(r'· ', '·', text)
+    
+    # 5. 붙임표(-) 앞뒤 공백 - 단어 사이의 하이픈만 (줄 시작 - 제외)
+    # "치료 ·사회재활" 같은 패턴은 4번에서 처리됨
+    
+    return text
+
+
 def extract_text(doc: PDFDocument, page_num: int = 0) -> str:
     """
-    특정 페이지에서 텍스트 추출 (Layout Analyzer 사용)
+    특정 페이지에서 텍스트 추출
     
     Args:
         doc: PDFDocument 객체
         page_num: 페이지 번호 (0부터 시작)
     
     Returns:
-        str: 추출된 텍스트 (읽기 순서로 정렬됨)
+        str: 추출된 텍스트 (읽기 순서로 정렬)
     """
-    from .core.layout_analyzer import analyze_page_layout
+    items = extract_text_with_positions(doc, page_num)
     
-    layout = analyze_page_layout(doc, page_num)
-    blocks = layout.get_reading_order()
+    if not items:
+        return ""
     
-    # 블록 텍스트 결합 (블록 간 빈 줄)
-    return '\n\n'.join(b.text for b in blocks if b.text.strip())
+    # 이미 Top-Down으로 정규화되어 있으므로 Y 오름차순
+    sorted_items = sorted(items, key=lambda t: (t.y, t.x))
+    
+    # 같은 줄의 글자들을 합치기
+    lines = []
+    current_line = []
+    current_y = None
+    
+    for item in sorted_items:
+        if current_y is None or abs(item.y - current_y) > 5:
+            # 새로운 줄
+            if current_line:
+                lines.append(current_line)
+            current_line = [item]
+            current_y = item.y
+        else:
+            current_line.append(item)
+    
+    if current_line:
+        lines.append(current_line)
+    
+    # 각 줄에서 가까운 글자들을 합쳐서 단어로 만들기
+    result = []
+    for line in lines:
+        line.sort(key=lambda t: t.x)
+        
+        # 글자 간격 분석해서 단어 구분
+        words = []
+        current_word = ""
+        prev_x = None
+        prev_width = None
+        
+        for item in line:
+            text = item.text
+            if not text:
+                continue
+            
+            # 예상 글자 너비 (폰트 크기 기반 추정)
+            char_width = item.font_size * 0.6  # 대략적인 추정
+            
+            if prev_x is not None:
+                gap = item.x - prev_x
+                # 갭이 글자 너비의 1.5배 이상이면 단어 구분
+                threshold = char_width * 1.5
+                
+                if gap > threshold:
+                    if current_word.strip():
+                        words.append(current_word)
+                    current_word = text
+                else:
+                    current_word += text
+            else:
+                current_word = text
+            
+            # 한글/전각 문자와 영문/반각 문자 구분하여 텍스트 너비 추정
+            text_width = 0
+            for ch in text:
+                if ord(ch) > 0x2E7F:  # CJK/한글/전각 문자
+                    text_width += item.font_size * 0.9
+                else:
+                    text_width += item.font_size * 0.45
+            prev_x = item.x + text_width  # 텍스트 끝 예상 위치
+        
+        if current_word.strip():
+            words.append(current_word)
+        
+        # 단어 합치기: 이미 후행 공백이 있는 단어 처리
+        if words:
+            parts = []
+            for w in words:
+                if parts and not parts[-1].endswith(' ') and not w.startswith(' '):
+                    parts.append(' ')
+                parts.append(w)
+            line_text = ''.join(parts)
+        else:
+            line_text = ''
+        
+        if line_text.strip():
+            result.append(line_text)
+    
+    text = '\n'.join(result)
+    
+    # 후처리: 구두점/기호 주위 불필요한 공백 제거
+    text = _clean_punctuation_spacing(text)
+    
+    return text
 
 
 def extract_all_text(doc: PDFDocument) -> str:
