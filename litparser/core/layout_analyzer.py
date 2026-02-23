@@ -1,11 +1,20 @@
 """
-PDF Layout Analyzer - Stage 8 (Adaptive Column Detection)
+PDF Layout Analyzer - Stage 9.1 (Robust Column Detection)
 
 개선:
-1. 표/그림 영역 분리 후 본문 컬럼 분석
-2. 영역별 적응적 컬럼 감지
-3. 주요 클러스터 기반 2단 감지
-4. [Stage 8.1] 한글 텍스트 너비 계산 및 공백 삽입 개선
+1. [Stage 9] X좌표 범위 확대 및 갭 기반 2단 감지 개선
+2. [Stage 9.1] x0 기반 아이템 분류 (추정 너비 x1 사용 안 함)
+3. 표/그림 영역 분리 후 본문 컬럼 분석
+4. 영역별 적응적 컬럼 감지
+5. 주요 클러스터 기반 2단 감지
+6. [Stage 8.1] 한글 텍스트 너비 계산 및 공백 삽입 개선
+
+Stage 9.1 변경사항:
+- 아이템 분류를 x0(실제 시작 좌표)만 사용하도록 변경
+  → _to_boxed_item의 추정 너비(x1)가 부정확하여 잘못된 분류 발생 방지
+- x0 < left_col_max → LEFT
+- x0 >= right_col_min → RIGHT
+- 나머지 (left_col_max <= x0 < right_col_min) → FULL_WIDTH
 """
 
 from dataclasses import dataclass, field
@@ -66,21 +75,20 @@ def analyze_layout(text_items: list, page_width: float, page_height: float) -> P
         left_max = col_info['left_col_max']
         right_min = col_info['right_col_min']
         
-        # 아이템 분류
+        # [Stage 9.1] x0 기반 아이템 분류
+        # x0는 PDF에서 직접 추출한 정확한 시작 좌표
+        # x1은 추정 너비로 계산되어 부정확하므로 사용하지 않음
         full_width = []
         left_col = []
         right_col = []
         
         for b in boxed_items:
-            # 본문 영역 이전은 전체폭 (표/그림)
-            if b.y0 < y_threshold:
-                full_width.append(b)
-            # 본문 영역
-            elif b.x0 < left_max:
+            if b.x0 < left_max:
                 left_col.append(b)
             elif b.x0 >= right_min:
                 right_col.append(b)
             else:
+                # left_max <= x0 < right_min: 갭 영역 (제목, 중앙 텍스트)
                 full_width.append(b)
         
         all_blocks = []
@@ -94,7 +102,7 @@ def analyze_layout(text_items: list, page_width: float, page_height: float) -> P
                         block.column = col_num
                         all_blocks.append(block)
         
-        all_blocks = _sort_reading_order_with_table(all_blocks, y_threshold)
+        all_blocks = _sort_reading_order_with_interleave(all_blocks)
     else:
         groups = _y_cut_groups(boxed_items)
         all_blocks = []
@@ -112,55 +120,66 @@ def analyze_layout(text_items: list, page_width: float, page_height: float) -> P
 
 def _find_two_column_region(items: List['BoxedItem'], page_width: float, page_height: float) -> tuple:
     """
-    2단 본문 영역 찾기
-    - 연속적으로 2단 구조가 유지되는 영역 탐지
-    - 표 영역은 일시적 2단처럼 보이지만 연속성이 낮음
+    [Stage 9] 개선된 2단 본문 영역 찾기
     """
     result = {'num_columns': 1, 'left_col_max': page_width/2, 'right_col_min': page_width/2}
     
     if len(items) < 10:
         return result, 0
     
-    # Y 값들을 20pt 단위로 샘플링
     y_values = sorted(set(int(i.y0 / 20) * 20 for i in items))
     
-    # 각 Y 시작점에서 2단 조건 체크
-    def check_two_column(y_start, min_left_x=45, max_left_x=60, min_gap=250):
+    def check_two_column(y_start, min_gap=150):
         region_items = [i for i in items if i.y0 >= y_start]
         if len(region_items) < 10:
             return None
         
         x_counter = Counter(int(i.x0 / 10) * 10 for i in region_items)
-        major = sorted([(x, c) for x, c in x_counter.items() if c >= 5], key=lambda t: t[0])
+        major = sorted([(x, c) for x, c in x_counter.items() if c >= 3], key=lambda t: t[0])
         
         if len(major) < 2:
             return None
         
         center = page_width / 2
+        best = None
+        best_gap = 0
+        
         for i in range(len(major) - 1):
-            left_x, right_x = major[i][0], major[i+1][0]
+            left_x, left_count = major[i]
+            right_x, right_count = major[i + 1]
             gap = right_x - left_x
-            mid = (left_x + right_x) / 2
+            gap_mid = (left_x + right_x) / 2
             
-            if gap >= min_gap and min_left_x <= left_x <= max_left_x and abs(mid - center) < page_width * 0.25:
-                return {'left_max': left_x + 60, 'right_min': right_x - 10, 'gap': gap}
-        return None
+            if (gap >= min_gap and 
+                page_width * 0.2 < gap_mid < page_width * 0.8 and
+                gap > best_gap):
+                
+                left_count_total = sum(1 for i in region_items if i.x0 < gap_mid)
+                right_count_total = sum(1 for i in region_items if i.x0 >= gap_mid)
+                
+                if left_count_total >= 5 and right_count_total >= 5:
+                    best_gap = gap
+                    best = {
+                        'left_max': left_x + 60,
+                        'right_min': right_x - 10,
+                        'gap': gap,
+                        'gap_center': gap_mid
+                    }
+        
+        return best
     
-    # 연속적인 2단 영역 찾기
-    # 최소 3개 연속 Y 포인트에서 2단이어야 함
     consecutive_count = 0
     first_y = None
     col_info = None
     
     for y_start in y_values:
         info = check_two_column(y_start)
-        if info and info['gap'] >= 250:  # 본문 2단은 갭이 큼
+        if info and info['gap'] >= 150:
             if first_y is None:
                 first_y = y_start
                 col_info = info
             consecutive_count += 1
             
-            # 3개 연속이면 본문 시작으로 인정
             if consecutive_count >= 3:
                 result['num_columns'] = 2
                 result['left_col_max'] = col_info['left_max']
@@ -174,71 +193,50 @@ def _find_two_column_region(items: List['BoxedItem'], page_width: float, page_he
     return result, 0
 
 
-def _sort_reading_order_with_table(blocks: List[TextBlock], y_threshold: float) -> List[TextBlock]:
-    """표/그림 영역 고려한 읽기 순서"""
-    # 상단 전체폭 (표 포함)
-    top_full = sorted([b for b in blocks if b.column == 0 and b.y < y_threshold], key=lambda b: b.y)
-    
-    # 본문 컬럼
-    left = sorted([b for b in blocks if b.column == 1], key=lambda b: b.y)
-    right = sorted([b for b in blocks if b.column == 2], key=lambda b: b.y)
-    
-    # 하단 전체폭
-    bottom_full = sorted([b for b in blocks if b.column == 0 and b.y >= y_threshold], key=lambda b: b.y)
-    
-    return top_full + left + right + bottom_full
-
-
-
-def _sort_reading_order_interleaved(blocks: List[TextBlock], page_height: float) -> List[TextBlock]:
-    """
-    인터리빙 읽기 순서:
-    전체폭 요소는 Y 위치에 따라 왼쪽/오른쪽 컬럼 사이에 배치
-    """
+def _sort_reading_order_with_interleave(blocks: List[TextBlock]) -> List[TextBlock]:
+    """전체폭 블록의 Y 위치에 따라 인터리빙"""
     if not blocks:
         return []
     
     full = [b for b in blocks if b.column == 0]
-    left = [b for b in blocks if b.column == 1]
-    right = [b for b in blocks if b.column == 2]
+    left = sorted([b for b in blocks if b.column == 1], key=lambda b: b.y)
+    right = sorted([b for b in blocks if b.column == 2], key=lambda b: b.y)
     
-    # 모든 블록을 Y로 정렬
-    all_sorted = sorted(blocks, key=lambda b: b.y)
+    full_sorted = sorted(full, key=lambda b: b.y)
+    
+    if not full_sorted:
+        return left + right
     
     result = []
-    processed = set()
+    left_idx = 0
+    right_idx = 0
     
-    for b in all_sorted:
-        if id(b) in processed:
-            continue
-        
-        if b.column == 0:
-            # 전체폭 블록
-            result.append(b)
-            processed.add(id(b))
-        else:
-            # 컬럼 블록: 같은 Y 영역의 왼쪽 → 오른쪽 순서로
-            y_threshold = b.font_size * 3
-            
-            # 같은 Y 영역의 왼쪽 컬럼 블록들
-            same_y_left = [lb for lb in left if id(lb) not in processed 
-                          and abs(lb.y - b.y) < y_threshold]
-            same_y_left.sort(key=lambda x: x.y)
-            
-            # 같은 Y 영역의 오른쪽 컬럼 블록들  
-            same_y_right = [rb for rb in right if id(rb) not in processed
-                           and abs(rb.y - b.y) < y_threshold]
-            same_y_right.sort(key=lambda x: x.y)
-            
-            # 왼쪽 먼저, 오른쪽 나중
-            for lb in same_y_left:
-                result.append(lb)
-                processed.add(id(lb))
-            for rb in same_y_right:
-                result.append(rb)
-                processed.add(id(rb))
+    for fi, fb in enumerate(full_sorted):
+        while left_idx < len(left) and left[left_idx].y < fb.y:
+            result.append(left[left_idx])
+            left_idx += 1
+        while right_idx < len(right) and right[right_idx].y < fb.y:
+            result.append(right[right_idx])
+            right_idx += 1
+        result.append(fb)
+    
+    while left_idx < len(left):
+        result.append(left[left_idx])
+        left_idx += 1
+    while right_idx < len(right):
+        result.append(right[right_idx])
+        right_idx += 1
     
     return result
+
+
+def _sort_reading_order_with_table(blocks: List[TextBlock], y_threshold: float) -> List[TextBlock]:
+    """표/그림 영역 고려한 읽기 순서 (하위 호환)"""
+    top_full = sorted([b for b in blocks if b.column == 0 and b.y < y_threshold], key=lambda b: b.y)
+    left = sorted([b for b in blocks if b.column == 1], key=lambda b: b.y)
+    right = sorted([b for b in blocks if b.column == 2], key=lambda b: b.y)
+    bottom_full = sorted([b for b in blocks if b.column == 0 and b.y >= y_threshold], key=lambda b: b.y)
+    return top_full + left + right + bottom_full
 
 
 def _y_cut_groups(items: List['BoxedItem']) -> List[List['BoxedItem']]:
@@ -250,7 +248,6 @@ def _y_cut_groups(items: List['BoxedItem']) -> List[List['BoxedItem']]:
     
     sorted_items = sorted(items, key=lambda i: i.y0)
     
-    # Y 구간 병합
     intervals = []
     curr_start, curr_end = sorted_items[0].y0, sorted_items[0].y1
     
@@ -262,7 +259,6 @@ def _y_cut_groups(items: List['BoxedItem']) -> List[List['BoxedItem']]:
             curr_start, curr_end = item.y0, item.y1
     intervals.append((curr_start, curr_end))
     
-    # 각 구간의 아이템 수집
     groups = []
     for start, end in intervals:
         group = [item for item in items if item.y0 >= start - 2 and item.y0 <= end + 2]
@@ -301,8 +297,6 @@ class BoxedItem:
 def _to_boxed_item(item) -> BoxedItem:
     fs = getattr(item, 'font_size', 10) or 10
     tlen = len(item.text) if item.text else 1
-    # [수정] 한글/전각 문자 고려하여 너비 계수 0.4 → 0.55
-    # 영문 반각: ~0.4, 한글 전각: ~0.5~0.6, 혼합 평균: ~0.55
     w = max(1.0, tlen * fs * 0.55)
     h = fs * 0.7
     return BoxedItem(item, item.x, item.y - h, w, h)
@@ -349,19 +343,23 @@ def _merge_line(line: List[BoxedItem]) -> str:
     line.sort(key=lambda b: b.x0)
     result = []
     prev_x = None
+    prev_text = ""
     for b in line:
+        text = b.item.text or ""
         if prev_x is not None:
             gap = b.x0 - prev_x
-            # [수정] gap threshold 조정
-            # 기존: >15 → 3칸, >1 → 1칸 (너무 민감)
-            # 수정: >20 → 공백, >5 → 공백, ≤5 → 연결 (너비 계수 보정과 함께)
-            if gap > 20:
-                result.append("  ")
+            prev_ends_space = prev_text.endswith(' ')
+            curr_starts_space = text.startswith(' ')
+            
+            if prev_ends_space or curr_starts_space:
+                pass
+            elif gap > 15:
+                result.append(" ")
             elif gap > 5:
                 result.append(" ")
-            # gap ≤ 5: 공백 없이 연결
-        result.append(b.item.text or "")
+        result.append(text)
         prev_x = b.x1
+        prev_text = text
     return "".join(result)
 
 

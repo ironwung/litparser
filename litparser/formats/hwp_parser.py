@@ -92,11 +92,19 @@ class HwpTable:
 
 
 @dataclass
+class HwpImage:
+    """HWP 이미지"""
+    filename: str
+    data: bytes
+    content_type: str = ""
+
+
+@dataclass
 class HwpDocument:
     """파싱된 HWP 문서"""
     paragraphs: List[HwpParagraph] = field(default_factory=list)
     tables: List[HwpTable] = field(default_factory=list)
-    images: List[dict] = field(default_factory=list)
+    images: List[HwpImage] = field(default_factory=list)
     
     title: str = ""
     author: str = ""
@@ -182,73 +190,6 @@ def _parse_tag_records(data: bytes) -> List[TagRecord]:
         records.append(TagRecord(tag_id=tag_id, level=level, data=rec_data))
     
     return records
-
-
-def _extract_tables(records: List[TagRecord]) -> List[HwpTable]:
-    """태그 레코드에서 테이블 추출"""
-    tables = []
-    
-    # TABLE 태그 위치 찾기
-    table_indices = [i for i, r in enumerate(records) if r.tag_id == HWPTAG_TABLE]
-    
-    for ti in table_indices:
-        rec = records[ti]
-        tbl_level = rec.level
-        
-        # TABLE 레코드에서 행/열 수 추출 (offset 4, 6)
-        if len(rec.data) < 8:
-            continue
-        n_rows = struct.unpack('<H', rec.data[4:6])[0]
-        n_cols = struct.unpack('<H', rec.data[6:8])[0]
-        
-        if n_rows == 0 or n_cols == 0 or n_rows > 500 or n_cols > 100:
-            continue
-        
-        # 셀 텍스트 수집: LIST_HEADER(same level) = 셀 구분자
-        cell_texts = []
-        current_cell = []
-        
-        for j in range(ti + 1, len(records)):
-            r2 = records[j]
-            
-            # 종료 조건: 다음 TABLE 태그
-            if r2.tag_id == HWPTAG_TABLE:
-                break
-            # 종료 조건: TABLE보다 낮은 레벨의 CTRL_HEADER (테이블 범위 벗어남)
-            if r2.tag_id == HWPTAG_CTRL_HEADER and r2.level <= tbl_level - 1:
-                break
-            # 종료 조건: TABLE보다 낮은 레벨
-            if r2.level < tbl_level:
-                break
-            
-            # LIST_HEADER(same level) = 새 셀 시작
-            if r2.tag_id == HWPTAG_LIST_HEADER and r2.level == tbl_level:
-                if current_cell:
-                    cell_texts.append('\n'.join(current_cell))
-                current_cell = []
-            # PARA_TEXT = 셀 내 텍스트
-            elif r2.tag_id == HWPTAG_PARA_TEXT:
-                text = _decode_text(r2.data)
-                if text.strip():
-                    current_cell.append(text.strip())
-        
-        # 마지막 셀
-        if current_cell:
-            cell_texts.append('\n'.join(current_cell))
-        
-        # 행/열로 재구성
-        table = HwpTable()
-        for r in range(n_rows):
-            row = []
-            for c in range(n_cols):
-                idx = r * n_cols + c
-                row.append(cell_texts[idx] if idx < len(cell_texts) else "")
-            table.rows.append(row)
-        
-        if table.rows:
-            tables.append(table)
-    
-    return tables
 
 
 def _extract_paragraphs_and_tables(records: List[TagRecord]) -> Tuple[List[HwpParagraph], List[HwpTable]]:
@@ -376,6 +317,7 @@ class HwpParser:
             raise ValueError("유효한 HWP 5.0 파일이 아님")
         
         self._parse_body_text()
+        self._extract_images()
         self._parse_metadata()
         
         return self.doc
@@ -440,6 +382,77 @@ class HwpParser:
         
         self.doc.paragraphs.extend(paragraphs)
         self.doc.tables.extend(tables)
+    
+    def _extract_images(self):
+        """BinData 스토리지에서 이미지 추출"""
+        IMAGE_EXTENSIONS = {
+            'png': 'image/png',
+            'jpg': 'image/jpeg',
+            'jpeg': 'image/jpeg',
+            'gif': 'image/gif',
+            'bmp': 'image/bmp',
+            'tif': 'image/tiff',
+            'tiff': 'image/tiff',
+        }
+        
+        for entry in self.ole.entries:
+            if entry.entry_type != 2:  # 스트림만
+                continue
+            
+            name = entry.name
+            # BinData 스트림: BIN0001.png, BIN0002.jpg 등
+            # 또는 확장자 없이 BIN0001 형태 (zlib 압축)
+            if not name.upper().startswith('BIN'):
+                continue
+            
+            raw_data = self.ole._read_stream_data(entry)
+            if not raw_data or len(raw_data) < 8:
+                continue
+            
+            # 확장자로 이미지 타입 판별
+            ext = ''
+            if '.' in name:
+                ext = name.rsplit('.', 1)[-1].lower()
+            
+            # 확장자 없으면 매직 바이트로 판별
+            if ext not in IMAGE_EXTENSIONS:
+                # 압축 해제 시도
+                decompressed = None
+                if self.is_compressed:
+                    try:
+                        decompressed = zlib.decompress(raw_data, -15)
+                    except zlib.error:
+                        try:
+                            decompressed = zlib.decompress(raw_data)
+                        except zlib.error:
+                            pass
+                
+                check_data = decompressed if decompressed else raw_data
+                
+                # 매직 바이트로 포맷 감지
+                if check_data[:8] == b'\x89PNG\r\n\x1a\n':
+                    ext = 'png'
+                elif check_data[:2] == b'\xff\xd8':
+                    ext = 'jpg'
+                elif check_data[:6] in (b'GIF87a', b'GIF89a'):
+                    ext = 'gif'
+                elif check_data[:2] == b'BM':
+                    ext = 'bmp'
+                elif check_data[:4] in (b'II\x2a\x00', b'MM\x00\x2a'):
+                    ext = 'tiff'
+                else:
+                    continue  # 이미지가 아님
+                
+                raw_data = check_data  # 압축 해제된 데이터 사용
+            
+            content_type = IMAGE_EXTENSIONS.get(ext, 'application/octet-stream')
+            filename = f"{name.rsplit('.', 1)[0]}.{ext}" if '.' not in name else name
+            
+            self.doc.images.append(HwpImage(
+                filename=filename,
+                data=raw_data,
+                content_type=content_type
+            ))
     
     def _parse_metadata(self):
         """메타데이터 추출"""

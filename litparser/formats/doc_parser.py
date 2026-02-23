@@ -208,7 +208,7 @@ def _extract_text(word_doc: bytes, fib: dict, table_stream: bytes) -> str:
         text = _clean_text(text)
         if text:
             return text
-    except:
+    except Exception:
         pass
     
     # ANSI 시도
@@ -218,7 +218,7 @@ def _extract_text(word_doc: bytes, fib: dict, table_stream: bytes) -> str:
         text = _clean_text(text)
         if text:
             return text
-    except:
+    except Exception:
         pass
     
     # 폴백: 전체 스캔
@@ -236,7 +236,7 @@ def _scan_text(data: bytes) -> str:
         text = _clean_text(text)
         if len(text) > 100:  # 충분한 텍스트
             return text
-    except:
+    except Exception:
         pass
     
     # CP1252 시도 (ANSI)
@@ -245,7 +245,7 @@ def _scan_text(data: bytes) -> str:
         text = _clean_text(text)
         if len(text) > 100:
             return text
-    except:
+    except Exception:
         pass
     
     # CP949 시도 (한글)
@@ -254,7 +254,7 @@ def _scan_text(data: bytes) -> str:
         text = _clean_text(text)
         if len(text) > 100:
             return text
-    except:
+    except Exception:
         pass
     
     return ""
@@ -314,7 +314,7 @@ def _parse_summary(data: bytes) -> Tuple[str, str]:
         # UTF-16LE로 시도
         text = data.decode('utf-16le', errors='ignore')
         # 실제로는 Property Set 구조 파싱 필요
-    except:
+    except Exception:
         pass
     
     return title, author

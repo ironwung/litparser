@@ -253,7 +253,7 @@ def _parse_sst(data: bytes, workbook: bytes, continue_pos: int) -> List[str]:
         try:
             s, pos = _read_unicode_string(full_data, pos)
             strings.append(s)
-        except:
+        except (struct.error, IndexError, UnicodeDecodeError):
             break
     
     return strings

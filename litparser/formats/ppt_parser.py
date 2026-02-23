@@ -197,7 +197,7 @@ def _extract_all_texts(data: bytes) -> List[str]:
                 text = _clean_text(text)
                 if text:
                     texts.append(text)
-            except:
+            except (UnicodeDecodeError, struct.error, IndexError):
                 pass
         
         elif rec_type == RT_TEXT_BYTES:
@@ -207,7 +207,7 @@ def _extract_all_texts(data: bytes) -> List[str]:
                 text = _clean_text(text)
                 if text:
                     texts.append(text)
-            except:
+            except (UnicodeDecodeError, struct.error, IndexError):
                 pass
         
         elif rec_type == RT_CSTRING:
@@ -217,7 +217,7 @@ def _extract_all_texts(data: bytes) -> List[str]:
                 text = _clean_text(text)
                 if text:
                     texts.append(text)
-            except:
+            except (UnicodeDecodeError, struct.error, IndexError):
                 pass
         
         # 컨테이너 레코드는 내부 파싱

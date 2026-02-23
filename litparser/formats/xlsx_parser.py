@@ -224,7 +224,7 @@ def _parse_core_xml(zf: zipfile.ZipFile) -> Tuple[str, str, str]:
         el = root.find('dcterms:created', NS)
         if el is not None and el.text:
             created = el.text
-    except:
+    except Exception:
         pass
     
     return title, author, created
@@ -253,7 +253,7 @@ def _parse_shared_strings(zf: zipfile.ZipFile) -> List[str]:
                     text_parts.append(t.text)
             
             strings.append("".join(text_parts))
-    except:
+    except Exception:
         pass
     
     return strings
@@ -272,7 +272,7 @@ def _parse_workbook(zf: zipfile.ZipFile) -> List[str]:
             for sheet in sheets.findall('main:sheet', NS):
                 name = sheet.get('name', f'Sheet{len(names) + 1}')
                 names.append(name)
-    except:
+    except Exception:
         pass
     
     # 시트가 없으면 파일에서 직접 찾기
@@ -282,7 +282,7 @@ def _parse_workbook(zf: zipfile.ZipFile) -> List[str]:
                 idx = name.replace('xl/worksheets/sheet', '').replace('.xml', '')
                 try:
                     names.append(f'Sheet{int(idx)}')
-                except:
+                except (ValueError, TypeError):
                     pass
         names.sort()
     
@@ -310,7 +310,7 @@ def _parse_sheet(zf: zipfile.ZipFile, path: str, name: str,
                 cell = _parse_cell(cell_el, row_num, shared_strings)
                 if cell:
                     sheet.cells[(cell.row, cell.col)] = cell
-    except:
+    except Exception:
         pass
     
     return sheet
@@ -351,7 +351,7 @@ def _parse_cell(cell_el: ET.Element, row_num: int,
                     value = shared_strings[idx]
                 else:
                     value = raw_value
-            except:
+            except (ValueError, IndexError):
                 value = raw_value
         elif cell_type == 'b':
             # 불리언
@@ -363,7 +363,7 @@ def _parse_cell(cell_el: ET.Element, row_num: int,
                     value = float(raw_value)
                 else:
                     value = int(raw_value)
-            except:
+            except (ValueError, TypeError):
                 value = raw_value
         else:
             value = raw_value

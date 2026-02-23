@@ -129,7 +129,7 @@ def extract_images(doc, page_num: int = None) -> List[PDFImage]:
             # zlib 압축 해제
             try:
                 image_data = zlib.decompress(raw_data)
-            except:
+            except (zlib.error, ValueError):
                 image_data = raw_data
         else:
             # 다른 필터는 StreamDecoder 사용
@@ -138,7 +138,7 @@ def extract_images(doc, page_num: int = None) -> List[PDFImage]:
                     image_data = StreamDecoder.decode(raw_data, filter_name)
                 else:
                     image_data = raw_data
-            except:
+            except Exception:
                 image_data = raw_data
         
         # 채널 수를 color_space에 포함

@@ -58,8 +58,9 @@ def main():
     try:
         from . import parse, to_markdown, to_json
         
-        # 파싱
-        result = parse(str(filepath), include_images=args.include_images)
+        # 파싱 (--info 모드에서는 이미지 개수 표시를 위해 include_images 활성화)
+        include_images = args.include_images or args.info
+        result = parse(str(filepath), include_images=include_images)
         
         # 문서 정보
         if args.info:

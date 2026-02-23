@@ -87,6 +87,16 @@ class HwpxDocument:
     author: str = ""
     created: str = ""
     
+    # 중복 방지용 텍스트 캐시 (내부용)
+    _text_set: set = field(default_factory=set, repr=False)
+    
+    def add_paragraph(self, para: 'HwpxParagraph'):
+        """문단 추가 (중복 방지)"""
+        key = para.text.strip()
+        if key and key not in self._text_set:
+            self.paragraphs.append(para)
+            self._text_set.add(key)
+    
     def get_text(self) -> str:
         """전체 텍스트"""
         lines = []
@@ -209,7 +219,7 @@ def _parse_section_xml(content: bytes, doc: HwpxDocument):
                 continue
             para = _parse_paragraph(elem)
             if para and para.text.strip():
-                doc.paragraphs.append(para)
+                doc.add_paragraph(para)
 
 
 def _process_p_with_table(p_elem, doc: HwpxDocument):
@@ -236,9 +246,7 @@ def _process_p_with_table(p_elem, doc: HwpxDocument):
     _collect_texts_skip_tables(p_elem, p_texts)
     p_text = ''.join(p_texts).strip()
     if p_text:
-        existing = {p.text.strip() for p in doc.paragraphs}
-        if p_text not in existing:
-            doc.paragraphs.append(HwpxParagraph(text=p_text))
+        doc.add_paragraph(HwpxParagraph(text=p_text))
 
 
 def _find_top_level_tables(elem, result: list):
@@ -296,10 +304,7 @@ def _add_layout_table_as_text(table: HwpxTable, doc: HwpxDocument):
         texts = [cell.strip() for cell in row if cell.strip()]
         if texts:
             combined = ' '.join(texts)
-            # 이미 동일한 텍스트가 문단에 있는지 확인 (중복 방지)
-            existing_texts = {p.text.strip() for p in doc.paragraphs}
-            if combined not in existing_texts:
-                doc.paragraphs.append(HwpxParagraph(text=combined))
+            doc.add_paragraph(HwpxParagraph(text=combined))
 
 
 def _parse_paragraph(elem) -> Optional[HwpxParagraph]:
@@ -394,8 +399,9 @@ def _parse_table(elem) -> Optional[HwpxTable]:
 def _extract_images(zf: zipfile.ZipFile, doc: HwpxDocument):
     """이미지 추출"""
     for name in zf.namelist():
-        # BinData 또는 Media 폴더
-        if '/BinData/' in name or '/media/' in name.lower():
+        # BinData 또는 Media 폴더 (루트 또는 하위 경로 모두)
+        name_lower = name.lower()
+        if 'bindata/' in name_lower or '/media/' in name_lower:
             ext = name.split('.')[-1].lower()
             if ext in ['png', 'jpg', 'jpeg', 'gif', 'bmp', 'emf', 'wmf']:
                 data = zf.read(name)

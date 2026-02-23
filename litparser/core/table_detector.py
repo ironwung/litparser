@@ -1,16 +1,13 @@
 """
-PDF Table Detector - Stage 6 (Improved Visual Projection)
+PDF Table Detector - Stage 5 (Visual Projection 방식)
 
 텍스트 위치 기반 테이블 감지:
 1. Y좌표로 행(Row) 분리
 2. X좌표 클러스터링으로 열(Column) 감지
-3. 쪼개진 테이블 병합 (Stitching) - 개선된 조건
-4. 강화된 유효성 검증
+3. 쪼개진 테이블 병합 (Stitching)
+4. 유효성 검증
 
-개선사항 (Stage 6):
-- 본문 텍스트의 테이블 오인식 방지 (다열 행 비율 검증)
-- 과잉 병합 방지 (열 수 유사성, 간격 제한 강화)
-- 구조적 일관성 검증 (행별 열 분포 분석)
+Based on Gemini's Visual-Stitch approach with improvements.
 """
 
 from dataclasses import dataclass, field
@@ -191,7 +188,6 @@ def _analyze_block_for_table(block: list, min_cols: int = 2) -> Optional[Table]:
     Visual Projection 방식:
     - Y좌표로 행 구분
     - X좌표 세그먼트로 열 구분
-    - 다열 행 비율 검증으로 본문 텍스트 오인식 방지
     """
     if len(block) < 3:  # 최소 3개 텍스트 필요
         return None
@@ -202,10 +198,68 @@ def _analyze_block_for_table(block: list, min_cols: int = 2) -> Optional[Table]:
         row_key = int(t.y / 5)
         rows[row_key].append(t)
     
+    # Y좌표 방향 자동 감지: 
+    # - 일반 PDF: Y가 작을수록 위쪽 (오름차순 정렬)
+    # - 일부 PDF: Y가 클수록 위쪽 (내림차순 정렬)
+    # 여기서는 항상 오름차순(작은 Y가 첫 행)으로 정렬
     sorted_row_keys = sorted(rows.keys())  # 오름차순 (작은 Y = 위쪽)
     
     if len(sorted_row_keys) < 2:
         return None
+    
+    # 연속 문장/불릿 문단 사전 필터링
+    if len(sorted_row_keys) <= 4:
+        # 각 행의 텍스트 합치기
+        row_texts = {}
+        row_starts = {}
+        for rk in sorted_row_keys:
+            items = sorted(rows[rk], key=lambda t: t.x)
+            non_space = [t for t in items if t.text.strip()]
+            if non_space:
+                row_starts[rk] = min(t.x for t in non_space)
+                row_texts[rk] = ' '.join(t.text for t in non_space).strip()
+            else:
+                row_texts[rk] = ''
+        
+        if row_texts:
+            all_texts = list(row_texts.values())
+            
+            # 패턴 1: 불릿/넘버링 문단 (◦, ➀, ➁, □, -, · 등으로 시작)
+            bullet_pattern = regex.compile(r'^[◦○●◆■□➀➁➂➃\-·•※▶►▷△▲]')
+            first_text = all_texts[0] if all_texts else ''
+            if bullet_pattern.match(first_text):
+                # 첫 행이 불릿으로 시작하면 문단일 가능성 높음
+                # 나머지 행도 같은 불릿이거나 이어지는 텍스트인지 확인
+                is_paragraph = True
+                for txt in all_texts[1:]:
+                    if not txt:
+                        continue
+                    # 다음 행이 불릿으로 시작하거나, 이어지는 텍스트
+                    if bullet_pattern.match(txt):
+                        continue  # 같은 수준의 불릿
+                    # 조사/접속사/일반 단어로 시작하면 이어지는 문장
+                    if not regex.match(r'^[A-Z가-힣]', txt):
+                        is_paragraph = False
+                        break
+                if is_paragraph:
+                    return None
+            
+            # 패턴 2: 같은 X 시작점에서 시작하는 연속 문장
+            if row_starts:
+                starts = list(row_starts.values())
+                if max(starts) - min(starts) < 15:
+                    all_sentence = True
+                    for txt in all_texts:
+                        if not txt or len(txt) < 3:
+                            continue
+                        # '-'로 시작하는 목록 또는 마침표로 끝나는 문장
+                        if txt.startswith('-') or txt.startswith('·'):
+                            continue
+                        if txt[-1] in '.。,，':
+                            continue
+                        all_sentence = False
+                    if all_sentence:
+                        return None
     
     # 2. 열(Column) 감지: X좌표 세그먼트 병합
     x_segments = []
@@ -230,27 +284,6 @@ def _analyze_block_for_table(block: list, min_cols: int = 2) -> Optional[Table]:
         columns.append((curr_start, curr_end))
     
     if len(columns) < min_cols:
-        return None
-    
-    # === [Stage 6] 다열 행 비율 검증 ===
-    # 실제로 여러 열에 텍스트가 있는 행이 충분한지 확인
-    # 대부분의 행이 1개 열에만 텍스트가 있으면 일반 본문
-    multi_col_rows = 0
-    for row_key in sorted_row_keys:
-        row_items = rows[row_key]
-        # 이 행의 텍스트들이 몇 개 열에 분포하는지 확인
-        col_indices = set()
-        for t in row_items:
-            for col_idx, (col_start, col_end) in enumerate(columns):
-                if col_start - 25 <= t.x <= col_end + 25:
-                    col_indices.add(col_idx)
-                    break
-        if len(col_indices) >= 2:
-            multi_col_rows += 1
-    
-    # 다열 행이 전체 행의 30% 미만이면 테이블이 아님
-    multi_col_ratio = multi_col_rows / len(sorted_row_keys) if sorted_row_keys else 0
-    if multi_col_ratio < 0.3:
         return None
     
     # 3. 셀 생성
@@ -324,10 +357,9 @@ def _analyze_block_for_table(block: list, min_cols: int = 2) -> Optional[Table]:
 
 def _stitch_tables(tables: List[Table], debug: bool = False) -> List[Table]:
     """
-    수직으로 인접한 테이블 병합 (개선)
+    수직으로 인접한 테이블 병합
     
-    헤더와 본문이 분리된 경우만 병합.
-    별도의 독립 테이블은 병합하지 않음.
+    헤더와 본문이 분리된 경우, 연속된 테이블 등을 하나로 합침
     """
     if not tables:
         return []
@@ -349,22 +381,16 @@ def _stitch_tables(tables: List[Table], debug: bool = False) -> List[Table]:
         overlap = max(0, x2 - x1)
         min_width = min(current.width, next_t.width) if min(current.width, next_t.width) > 0 else 1
         
-        # === [Stage 6] 개선된 병합 조건 ===
-        # 1. 수평 80% 이상 겹침 (70% → 80%로 강화)
-        is_overlap = overlap > (min_width * 0.8)
+        # 병합 조건:
+        # 1. 수평 70% 이상 겹침
+        # 2. 수직 간격 50pt 이내 (과도한 병합 방지)
+        # 3. 열 개수가 같으면 간격 완화 (70pt)
+        is_overlap = overlap > (min_width * 0.7)
+        is_gap_ok = -30 < gap < 50
+        is_same_cols = current.cols == next_t.cols
+        is_gap_ok_relaxed = -30 < gap < 70
         
-        # 2. 수직 간격 50pt 이내 (100pt → 50pt로 강화)
-        is_gap_ok = -20 < gap < 50
-        
-        # 3. 열 개수가 유사해야 함 (차이 1 이내)
-        col_diff = abs(current.cols - next_t.cols)
-        is_similar_cols = col_diff <= 1
-        
-        # 4. 병합 후 결과가 너무 크지 않아야 함 (행 30개 제한)
-        merged_rows = current.rows + next_t.rows
-        is_size_ok = merged_rows <= 30
-        
-        should_merge = is_overlap and is_gap_ok and is_similar_cols and is_size_ok
+        should_merge = is_overlap and (is_gap_ok or (is_same_cols and is_gap_ok_relaxed))
         
         if should_merge:
             if debug:
@@ -398,7 +424,7 @@ def _stitch_tables(tables: List[Table], debug: bool = False) -> List[Table]:
 
 
 def _is_valid_table(table: Table, min_rows: int, min_cols: int) -> bool:
-    """테이블 유효성 검증 (강화)"""
+    """테이블 유효성 검증"""
     # 1. 최소 크기
     if table.rows < min_rows or table.cols < min_cols:
         return False
@@ -418,26 +444,40 @@ def _is_valid_table(table: Table, min_rows: int, min_cols: int) -> bool:
     if table.cols == 1:
         return False
     
-    # === [Stage 6] 구조적 일관성 검증 ===
-    
-    # 5. 행별 사용된 열 수 분석
-    # 대부분의 행이 실제로 여러 열을 사용하는지 확인
-    row_col_counts = defaultdict(set)
-    for cell in table.cells:
-        if cell.text.strip():
-            row_col_counts[cell.row].add(cell.col)
-    
-    if row_col_counts:
-        multi_col_rows = sum(1 for cols in row_col_counts.values() if len(cols) >= 2)
-        ratio = multi_col_rows / len(row_col_counts)
-        # 다열 행이 25% 미만이면 테이블이 아닌 본문 텍스트
-        if ratio < 0.25:
+    # 5. 소규모 테이블(2-3행)에서 문장형 텍스트 감지
+    #    각 행의 셀들을 합쳤을 때 자연어 문장이면 테이블이 아님
+    if table.rows <= 3:
+        grid = table.to_list()
+        sentence_rows = 0
+        for row in grid:
+            # 행의 전체 텍스트를 합침
+            full_text = ' '.join(cell.strip() for cell in row if cell.strip())
+            full_text = regex.sub(r'\s+', ' ', full_text).strip()
+            if len(full_text) < 5:
+                continue
+            # 문장 패턴: 조사/어미로 이어지는 한국어 문장 또는 '-'로 시작하는 목록
+            # 셀 경계에서 끊긴 문장이면 오탐
+            has_split_sentence = False
+            non_empty_cells = [cell.strip() for cell in row if cell.strip()]
+            if len(non_empty_cells) >= 2:
+                # 마지막 셀이 앞 셀의 이어지는 텍스트인지 확인
+                # (조사, 구두점, 짧은 단어로 시작하면 이어지는 문장)
+                last_cell = non_empty_cells[-1]
+                first_cell = non_empty_cells[0]
+                # 앞 셀이 문장 중간에서 끊긴 경우
+                if (first_cell and not first_cell[-1] in '.!?。' and
+                    last_cell and len(last_cell) < len(first_cell) * 0.8):
+                    has_split_sentence = True
+            if has_split_sentence:
+                sentence_rows += 1
+        
+        if sentence_rows == table.rows:
             return False
     
-    # 6. 너무 큰 테이블은 과잉 병합 가능성 (행 25개 초과)
-    if table.rows > 25:
-        # 정말로 큰 테이블인지 확인: 채움률이 높아야 함
-        if total > 0 and non_empty / total < 0.2:
+    # 6. 빈 셀 비율이 너무 높은 테이블 (70% 이상 빈 셀)
+    if total > 0:
+        empty_ratio = 1 - (non_empty / total)
+        if empty_ratio > 0.7 and table.rows > 3:
             return False
     
     return True
@@ -465,3 +505,5 @@ def extract_tables_from_page(doc, page_num: int = 0, debug: bool = False, **kwar
 # 테스트
 if __name__ == '__main__':
     print("테이블 감지 모듈 로드됨")
+    groups = {}
+    current_group = sorted_values[0]

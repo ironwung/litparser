@@ -216,7 +216,7 @@ class StructTreeParser:
         
         try:
             text = content.decode('latin-1', errors='replace')
-        except:
+        except Exception:
             return
         
         # BDC ~ EMC 범위 파싱
@@ -275,7 +275,7 @@ class StructTreeParser:
         
         try:
             text = content.decode('latin-1', errors='replace')
-        except:
+        except Exception:
             return
         
         # BDC (Begin Marked Content) 패턴
@@ -551,7 +551,7 @@ class StructTreeParser:
         # 테이블 태그가 있는지 확인
         try:
             content_str = content_data.decode('latin-1', errors='replace')
-        except:
+        except Exception:
             return []
         
         if '/Table' not in content_str and '/TH' not in content_str:
@@ -570,7 +570,7 @@ class StructTreeParser:
                 h = float(match.group(4))
                 if abs(w) > 10 and abs(h) > 10:
                     rectangles.append({'x': x, 'y': y, 'w': abs(w), 'h': abs(h)})
-            except:
+            except (ValueError, TypeError):
                 continue
         
         if len(rectangles) < 4:
