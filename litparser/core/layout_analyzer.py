@@ -1,20 +1,22 @@
 """
-PDF Layout Analyzer - Stage 9.1 (Robust Column Detection)
+PDF Layout Analyzer - Stage 9.2 (Improved Column Detection)
 
 개선:
 1. [Stage 9] X좌표 범위 확대 및 갭 기반 2단 감지 개선
 2. [Stage 9.1] x0 기반 아이템 분류 (추정 너비 x1 사용 안 함)
-3. 표/그림 영역 분리 후 본문 컬럼 분석
-4. 영역별 적응적 컬럼 감지
-5. 주요 클러스터 기반 2단 감지
+3. [Stage 9.2] 히스토그램 빈 영역(empty zone) 기반 2단 감지
+   → 인접 클러스터 비교 대신 x0 분포의 빈 구간을 찾아 2단 경계 결정
+   → 읽기 순서: 같은 Y 대역에서 left 전체 → right 전체
+4. 표/그림 영역 분리 후 본문 컬럼 분석
+5. 영역별 적응적 컬럼 감지
 6. [Stage 8.1] 한글 텍스트 너비 계산 및 공백 삽입 개선
 
-Stage 9.1 변경사항:
-- 아이템 분류를 x0(실제 시작 좌표)만 사용하도록 변경
-  → _to_boxed_item의 추정 너비(x1)가 부정확하여 잘못된 분류 발생 방지
-- x0 < left_col_max → LEFT
-- x0 >= right_col_min → RIGHT
-- 나머지 (left_col_max <= x0 < right_col_min) → FULL_WIDTH
+Stage 9.2 변경사항:
+- _find_two_column_region: 히스토그램 빈 영역 방식으로 완전 재작성
+  → x0 좌표를 5pt 단위 히스토그램으로 만들고, 페이지 중앙 부근의
+     빈 구간(아이템이 거의 없는 영역)을 찾아 2단 경계로 사용
+- _sort_reading_order_with_interleave: Y 대역별 left→right 순서 보장
+  → 같은 Y 대역의 left 블록들을 모두 출력한 후 right 블록 출력
 """
 
 from dataclasses import dataclass, field
@@ -76,8 +78,6 @@ def analyze_layout(text_items: list, page_width: float, page_height: float) -> P
         right_min = col_info['right_col_min']
         
         # [Stage 9.1] x0 기반 아이템 분류
-        # x0는 PDF에서 직접 추출한 정확한 시작 좌표
-        # x1은 추정 너비로 계산되어 부정확하므로 사용하지 않음
         full_width = []
         left_col = []
         right_col = []
@@ -88,7 +88,6 @@ def analyze_layout(text_items: list, page_width: float, page_height: float) -> P
             elif b.x0 >= right_min:
                 right_col.append(b)
             else:
-                # left_max <= x0 < right_min: 갭 영역 (제목, 중앙 텍스트)
                 full_width.append(b)
         
         all_blocks = []
@@ -120,112 +119,198 @@ def analyze_layout(text_items: list, page_width: float, page_height: float) -> P
 
 def _find_two_column_region(items: List['BoxedItem'], page_width: float, page_height: float) -> tuple:
     """
-    [Stage 9] 개선된 2단 본문 영역 찾기
+    [Stage 9.2] 히스토그램 빈 영역 기반 2단 감지
+    
+    방법:
+    1. 본문 영역 아이템의 x0 좌표를 5pt 단위 히스토그램으로 만듦
+    2. 페이지 중앙 부근(20%~80%)에서 아이템이 거의 없는 빈 구간(gap)을 찾음
+    3. 가장 넓은 빈 구간의 좌우를 2단 경계로 사용
+    
+    이전 방식(인접 클러스터 비교)의 문제:
+    - 같은 단 내의 들여쓰기/수식 등이 별도 클러스터로 잡혀
+      실제 2단 갭을 감지하지 못하는 경우가 발생
     """
-    result = {'num_columns': 1, 'left_col_max': page_width/2, 'right_col_min': page_width/2}
+    result = {'num_columns': 1, 'left_col_max': page_width / 2, 'right_col_min': page_width / 2}
     
     if len(items) < 10:
         return result, 0
     
-    y_values = sorted(set(int(i.y0 / 20) * 20 for i in items))
+    # 본문 영역 아이템만 사용 (상단/하단 여백 제외)
+    body_items = [i for i in items if page_height * 0.08 < i.y0 < page_height * 0.92]
+    if len(body_items) < 10:
+        return result, 0
     
-    def check_two_column(y_start, min_gap=150):
-        region_items = [i for i in items if i.y0 >= y_start]
-        if len(region_items) < 10:
-            return None
-        
-        x_counter = Counter(int(i.x0 / 10) * 10 for i in region_items)
-        major = sorted([(x, c) for x, c in x_counter.items() if c >= 3], key=lambda t: t[0])
-        
-        if len(major) < 2:
-            return None
-        
-        center = page_width / 2
-        best = None
-        best_gap = 0
-        
-        for i in range(len(major) - 1):
-            left_x, left_count = major[i]
-            right_x, right_count = major[i + 1]
-            gap = right_x - left_x
-            gap_mid = (left_x + right_x) / 2
-            
-            if (gap >= min_gap and 
-                page_width * 0.2 < gap_mid < page_width * 0.8 and
-                gap > best_gap):
-                
-                left_count_total = sum(1 for i in region_items if i.x0 < gap_mid)
-                right_count_total = sum(1 for i in region_items if i.x0 >= gap_mid)
-                
-                if left_count_total >= 5 and right_count_total >= 5:
-                    best_gap = gap
-                    best = {
-                        'left_max': left_x + 60,
-                        'right_min': right_x - 10,
-                        'gap': gap,
-                        'gap_center': gap_mid
-                    }
-        
-        return best
+    # x0 히스토그램 (5pt 단위 bin)
+    bin_size = 5
+    num_bins = int(page_width / bin_size) + 1
+    histogram = [0] * num_bins
     
-    consecutive_count = 0
-    first_y = None
-    col_info = None
+    for item in body_items:
+        bin_idx = int(item.x0 / bin_size)
+        if 0 <= bin_idx < num_bins:
+            histogram[bin_idx] += 1
     
-    for y_start in y_values:
-        info = check_two_column(y_start)
-        if info and info['gap'] >= 150:
-            if first_y is None:
-                first_y = y_start
-                col_info = info
-            consecutive_count += 1
-            
-            if consecutive_count >= 3:
-                result['num_columns'] = 2
-                result['left_col_max'] = col_info['left_max']
-                result['right_col_min'] = col_info['right_min']
-                return result, first_y
-        else:
-            consecutive_count = 0
-            first_y = None
-            col_info = None
+    # x0 분포의 두 주요 클러스터 사이 빈 영역 찾기
+    # 검색 범위: 마진(10%) 안쪽 전체
+    search_start = int(page_width * 0.1 / bin_size)
+    search_end = int(page_width * 0.9 / bin_size)
     
-    return result, 0
+    # 빈 구간 = 히스토그램 값이 threshold 이하인 연속 구간
+    # threshold를 0으로 시작하고, 못 찾으면 점진적으로 올림
+    best_gaps = []
+    
+    for threshold in [0, 1, 2, 3]:
+        gaps = []
+        gap_start = None
+        
+        for i in range(search_start, search_end + 1):
+            if histogram[i] <= threshold:
+                if gap_start is None:
+                    gap_start = i
+            else:
+                if gap_start is not None:
+                    gap_width = (i - gap_start) * bin_size
+                    gap_center = ((gap_start + i) / 2) * bin_size
+                    # 갭이 페이지 중앙 부근(25%~75%)에 있어야 함
+                    if (gap_width >= 15 and 
+                        page_width * 0.25 < gap_center < page_width * 0.75):
+                        gaps.append((gap_start, i, gap_width))
+                    gap_start = None
+        
+        if gap_start is not None:
+            gap_width = (search_end - gap_start) * bin_size
+            gap_center = ((gap_start + search_end) / 2) * bin_size
+            if (gap_width >= 15 and 
+                page_width * 0.25 < gap_center < page_width * 0.75):
+                gaps.append((gap_start, search_end, gap_width))
+        
+        if gaps:
+            best_gaps = gaps
+            break  # 가장 엄격한 threshold에서 찾은 갭 사용
+    
+    if not best_gaps:
+        return result, 0
+    
+    # 갭 후보 중 좌우 아이템 균형이 맞는 것 필터링 후 가장 넓은 것 선택
+    min_ratio = 0.15
+    total = len(body_items)
+    
+    valid_gaps = []
+    for gap in best_gaps:
+        g_start_x = gap[0] * bin_size
+        g_end_x = gap[1] * bin_size
+        g_center = (g_start_x + g_end_x) / 2
+        
+        left_count = sum(1 for i in body_items if i.x0 < g_center)
+        right_count = sum(1 for i in body_items if i.x0 >= g_center)
+        
+        if left_count >= total * min_ratio and right_count >= total * min_ratio:
+            valid_gaps.append(gap)
+    
+    if not valid_gaps:
+        return result, 0
+    
+    best_gap = max(valid_gaps, key=lambda g: g[2])
+    gap_start_x = best_gap[0] * bin_size
+    gap_end_x = best_gap[1] * bin_size
+    gap_center = (gap_start_x + gap_end_x) / 2
+    
+    # ─── 추가 검증: 라인별 교차 검증 (line-crossing validation) ───
+    # 글자 단위 아이템 감지: 한글 PDF는 글자별로 아이템이 분리되어
+    # x0가 페이지 전체에 분산됨 → 가짜 gap 발생 가능
+    avg_text_len = sum(len(getattr(i.item, 'text', '') or '') for i in body_items) / max(len(body_items), 1)
+    short_items = sum(1 for i in body_items if len(getattr(i.item, 'text', '') or '') <= 2)
+    is_char_level = avg_text_len < 5 and short_items > len(body_items) * 0.4
+    
+    from collections import defaultdict
+    y_groups = defaultdict(list)
+    for item in body_items:
+        y_key = round(item.y0 / 5) * 5
+        y_groups[y_key].append(item)
+    
+    crossing_lines = 0
+    total_lines = 0
+    for y_key, group in y_groups.items():
+        if len(group) < 2:
+            continue
+        total_lines += 1
+        left_in_gap = [i for i in group if i.x0 < gap_center - 10]
+        right_in_gap = [i for i in group if i.x0 > gap_center + 10]
+        if left_in_gap and right_in_gap:
+            if is_char_level:
+                # 글자 단위: 같은 줄에 양쪽 아이템 존재 = crossing
+                crossing_lines += 1
+            else:
+                # 단어/구 단위: inner_gap이 작을 때만 crossing (연속 텍스트)
+                max_left_x = max(i.x0 for i in left_in_gap)
+                min_right_x = min(i.x0 for i in right_in_gap)
+                if min_right_x - max_left_x < 50:
+                    crossing_lines += 1
+    
+    # 50% 이상의 줄이 crossing이면 → 1단 문서
+    if total_lines > 5 and crossing_lines > total_lines * 0.5:
+        return result, 0
+    
+    # 2단으로 판정
+    # left_col_max: 갭 시작점 (왼쪽 단의 아이템 x0은 이보다 작음)
+    # right_col_min: 갭 끝점 (오른쪽 단의 아이템 x0은 이보다 크거나 같음)
+    result['num_columns'] = 2
+    result['left_col_max'] = gap_start_x
+    result['right_col_min'] = gap_end_x
+    
+    # y_threshold: 2단이 시작되는 Y 좌표 (첫 번째 right 아이템 기준)
+    right_items = [i for i in body_items if i.x0 >= gap_end_x]
+    y_threshold = min(i.y0 for i in right_items) if right_items else 0
+    
+    return result, y_threshold
 
 
 def _sort_reading_order_with_interleave(blocks: List[TextBlock]) -> List[TextBlock]:
-    """전체폭 블록의 Y 위치에 따라 인터리빙"""
+    """
+    [Stage 9.2] Y 대역별 left→right 읽기 순서
+    
+    2단 레이아웃에서 올바른 읽기 순서:
+    1. full-width 블록을 Y 기준 분리점으로 사용
+    2. 각 분리 구간에서: left 블록 전체(Y순) → right 블록 전체(Y순)
+    3. full-width 블록이 없으면: left 전체 → right 전체
+    """
     if not blocks:
         return []
     
-    full = [b for b in blocks if b.column == 0]
+    full = sorted([b for b in blocks if b.column == 0], key=lambda b: b.y)
     left = sorted([b for b in blocks if b.column == 1], key=lambda b: b.y)
     right = sorted([b for b in blocks if b.column == 2], key=lambda b: b.y)
     
-    full_sorted = sorted(full, key=lambda b: b.y)
-    
-    if not full_sorted:
+    if not full:
+        # full-width 블록이 없으면 left 전체 → right 전체
         return left + right
     
+    # full-width 블록의 Y 위치를 분리점으로 사용
     result = []
-    left_idx = 0
-    right_idx = 0
     
-    for fi, fb in enumerate(full_sorted):
-        while left_idx < len(left) and left[left_idx].y < fb.y:
-            result.append(left[left_idx])
-            left_idx += 1
-        while right_idx < len(right) and right[right_idx].y < fb.y:
-            result.append(right[right_idx])
-            right_idx += 1
-        result.append(fb)
+    # 각 full-width 블록 사이의 구간에서 left→right 순서로 배치
+    boundaries = [float('-inf')] + [fb.y for fb in full] + [float('inf')]
     
-    while left_idx < len(left):
-        result.append(left[left_idx])
-        left_idx += 1
-    while right_idx < len(right):
-        result.append(right[right_idx])
-        right_idx += 1
+    for i in range(len(boundaries) - 1):
+        y_min = boundaries[i]
+        y_max = boundaries[i + 1]
+        
+        # 이 구간이 full-width 블록의 Y 위치인 경우
+        if y_min != float('-inf') and i - 1 < len(full):
+            fb = full[i - 1]
+            # full-width 블록의 bottom을 기준으로 구간 시작
+            y_min = fb.bottom
+        
+        if i > 0 and i - 1 < len(full):
+            result.append(full[i - 1])
+        
+        # 이 Y 구간의 left/right 블록
+        section_left = [b for b in left if b.y >= y_min and b.y < y_max]
+        section_right = [b for b in right if b.y >= y_min and b.y < y_max]
+        
+        # left 전체 → right 전체
+        result.extend(section_left)
+        result.extend(section_right)
     
     return result
 

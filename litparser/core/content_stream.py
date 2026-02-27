@@ -287,6 +287,7 @@ class ContentStreamParser:
         self.text_items: List[TextItem] = []
         self.state = TextState()
         self.state_stack: List[TextState] = []
+        self._current_font_single_byte = False  # Type3/Type1 = True, Type0/CID = False
     
     def parse(self, data: bytes) -> List[TextItem]:
         """Content Stream 파싱해서 텍스트 항목 추출"""
@@ -364,6 +365,14 @@ class ContentStreamParser:
                 font_size = self._get_value(operands[-1])
                 if isinstance(font_name, str):
                     self.state.font_name = font_name
+                    # 폰트 바이트 폭 결정: Type0/Identity-H = 2바이트, 나머지 = 1바이트
+                    font_info = self.font_map.get(font_name)
+                    if font_info:
+                        is_cid = (font_info.subtype == 'Type0' or 
+                                  'Identity' in str(font_info.encoding))
+                        self._current_font_single_byte = not is_cid
+                    else:
+                        self._current_font_single_byte = False
                 if isinstance(font_size, (int, float)):
                     self.state.font_size = float(font_size)
         
@@ -496,11 +505,18 @@ class ContentStreamParser:
                         texts.append(text)
                 elif item.type == CSTokenType.NUMBER:
                     # 큰 음수 값은 공백으로 처리 (커닝)
+                    # 단, 직전 텍스트가 이미 공백/제어문자로 끝나면 추가하지 않음
                     if item.value < -100:
-                        texts.append(' ')
+                        last_text = texts[-1] if texts else ''
+                        if last_text and not last_text[-1].isspace() and last_text[-1] != '\x01':
+                            texts.append(' ')
         
         if texts:
             full_text = ''.join(texts)
+            # 제어문자(U+0000~U+001F)를 공백으로 치환, 연속 공백을 하나로
+            import re
+            full_text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]+', ' ', full_text)
+            full_text = re.sub(r'  +', ' ', full_text)
             x, y = self.state.get_position()
             self.text_items.append(TextItem(
                 text=full_text,
@@ -549,8 +565,20 @@ class ContentStreamParser:
         """CMap을 사용해서 디코딩"""
         result = []
         
-        # 2바이트 단위로 처리 (CID 폰트)
-        if len(raw_bytes) % 2 == 0:
+        # 현재 폰트의 바이트 폭 결정
+        # Identity-H/Type0 = 2바이트 CID, Type3/Type1 등 = 1바이트
+        use_single_byte = self._current_font_single_byte
+        
+        if use_single_byte:
+            # 1바이트 단위 처리 (Type3, Type1 등)
+            for b in raw_bytes:
+                if b in cmap:
+                    result.append(cmap[b])
+                else:
+                    if b >= 0x20:
+                        result.append(chr(b))
+        elif len(raw_bytes) % 2 == 0:
+            # 2바이트 단위로 처리 (CID 폰트)
             for i in range(0, len(raw_bytes), 2):
                 code = (raw_bytes[i] << 8) | raw_bytes[i + 1]
                 if code in cmap:
@@ -562,7 +590,7 @@ class ContentStreamParser:
                     if raw_bytes[i + 1] in cmap:
                         result.append(cmap[raw_bytes[i + 1]])
         else:
-            # 1바이트 단위
+            # 홀수 바이트: 1바이트 단위
             for b in raw_bytes:
                 if b in cmap:
                     result.append(cmap[b])

@@ -444,35 +444,33 @@ def _is_valid_table(table: Table, min_rows: int, min_cols: int) -> bool:
     if table.cols == 1:
         return False
     
-    # 5. 소규모 테이블(2-3행)에서 문장형 텍스트 감지
-    #    각 행의 셀들을 합쳤을 때 자연어 문장이면 테이블이 아님
-    if table.rows <= 3:
+    # 5. 소규모 테이블(2-4행)에서 문장 분할 오탐 감지
+    if table.rows <= 4:
         grid = table.to_list()
         sentence_rows = 0
+        single_cell_rows = 0
+        non_empty_rows = 0
+        
         for row in grid:
-            # 행의 전체 텍스트를 합침
-            full_text = ' '.join(cell.strip() for cell in row if cell.strip())
-            full_text = regex.sub(r'\s+', ' ', full_text).strip()
-            if len(full_text) < 5:
-                continue
-            # 문장 패턴: 조사/어미로 이어지는 한국어 문장 또는 '-'로 시작하는 목록
-            # 셀 경계에서 끊긴 문장이면 오탐
-            has_split_sentence = False
             non_empty_cells = [cell.strip() for cell in row if cell.strip()]
-            if len(non_empty_cells) >= 2:
-                # 마지막 셀이 앞 셀의 이어지는 텍스트인지 확인
-                # (조사, 구두점, 짧은 단어로 시작하면 이어지는 문장)
-                last_cell = non_empty_cells[-1]
-                first_cell = non_empty_cells[0]
-                # 앞 셀이 문장 중간에서 끊긴 경우
-                if (first_cell and not first_cell[-1] in '.!?。' and
-                    last_cell and len(last_cell) < len(first_cell) * 0.8):
-                    has_split_sentence = True
-            if has_split_sentence:
+            if not non_empty_cells:
+                continue
+            non_empty_rows += 1
+            
+            if len(non_empty_cells) < 2:
+                # 셀이 1개인 행: 앞 행에서 줄바꿈된 나머지일 가능성 높음
+                single_cell_rows += 1
+                continue
+            
+            is_split = _is_split_sentence(non_empty_cells)
+            if is_split:
                 sentence_rows += 1
         
-        if sentence_rows == table.rows:
-            return False
+        # 분할 문장 행 + 단일셀 행이 대부분이면 표가 아님
+        if non_empty_rows > 0:
+            bad_rows = sentence_rows + single_cell_rows
+            if bad_rows >= non_empty_rows * 0.6:
+                return False
     
     # 6. 빈 셀 비율이 너무 높은 테이블 (70% 이상 빈 셀)
     if total > 0:
@@ -480,12 +478,119 @@ def _is_valid_table(table: Table, min_rows: int, min_cols: int) -> bool:
         if empty_ratio > 0.7 and table.rows > 3:
             return False
     
+    # 7. 소규모 테이블(2-3행)에서 모든 셀이 긴 서술형 텍스트이면 표가 아님
+    #    진짜 표: 헤더가 짧거나 숫자/코드/키워드 셀이 있음
+    #    가짜 표: 모든 셀이 긴 한국어 문장 조각
+    if table.rows <= 3 and table.cols == 2:
+        grid = table.to_list()
+        all_prose = True
+        for row in grid:
+            for cell in row:
+                cell_text = cell.strip()
+                if not cell_text:
+                    continue
+                # 짧은 셀(5자 이하)이 있으면 → 헤더/라벨일 수 있음 → 진짜 표 가능
+                if len(cell_text) <= 5:
+                    all_prose = False
+                    break
+                # 숫자만 있으면 → 데이터 셀 → 진짜 표
+                if cell_text.replace(' ', '').replace(',', '').replace('.', '').isdigit():
+                    all_prose = False
+                    break
+            if not all_prose:
+                break
+        if all_prose:
+            # 모든 셀이 6자 이상 서술형 → 분할 문장일 가능성 높음
+            return False
+    
     return True
+
+
+def _is_split_sentence(cells: list) -> bool:
+    """
+    셀 리스트가 하나의 문장이 분할된 것인지 판단
+    
+    예: ['입찰공고에 명시된 일정에 따른 것이라면 , 반드시 모든 입찰업체가', '참여하지 않았']
+    → True (하나의 문장이 잘린 것)
+    
+    예: ['국토교통부 고시 제2016-943호', '국토교통부 고시 제2018-614호']
+    → False (두 개의 독립된 내용)
+    """
+    if len(cells) < 2:
+        return False
+    
+    first = cells[0]
+    last = cells[-1]
+    
+    if not first or not last:
+        return False
+    
+    # 완전한 문장 끝 패턴
+    sentence_end_chars = ('.', '!', '?', '。', ')', '」', ', ')
+    # 한국어 문장 종결어미
+    ko_endings = ('다.', '함.', '임.', '음.', '됨.', '있다.', '한다.', '된다.',
+                  '없다.', '않다.', '이다.', '하다.')
+    
+    first_stripped = first.rstrip()
+    last_stripped = last.rstrip()
+    
+    # --- 패턴 1: 앞 셀이 길고 문장 끝이 아님, 뒤 셀이 짧음 ---
+    first_ends_mid = (
+        len(first) > 15 and
+        not any(first_stripped.endswith(e) for e in sentence_end_chars)
+    )
+    last_is_shorter = len(last) < len(first)
+    last_not_new_sentence = (
+        not last[0].isupper() and not last[0].isdigit()
+    )
+    
+    if first_ends_mid and last_is_shorter and last_not_new_sentence:
+        return True
+    
+    # --- 패턴 2: 뒤 셀이 한국어 연결 표현으로 시작 ---
+    ko_continuation_starts = (
+        '도 ', '를 ', '을 ', '에 ', '의 ', '와 ', '과 ', '으로', '에서',
+        '하여', '하고', '하는', '되는', '된 ', '한 ', '할 ', '다고',
+        '부 ', '등 ', '이상', '이하', '위한', '관한')
+    if any(last.startswith(s) for s in ko_continuation_starts):
+        return True
+    
+    # --- 패턴 3: 괄호/인용부호가 셀 경계에서 분리 ---
+    # 앞 셀이 여는 괄호/인용부호로 끝나거나, 뒤 셀이 닫는 괄호로 시작
+    if first_stripped.endswith(('「', '(', '[', '「')) and not last_stripped.startswith(('「', '(', '[')):
+        return True
+    if last.startswith(('」', ')', ']')) or last.startswith(('」 ,', ') ,', '] ,')):
+        return True
+    
+    # --- 패턴 4: 셀을 합쳤을 때 자연스러운 문장, 개별 셀은 불완전 ---
+    if len(cells) == 2:
+        last_words = last.split()
+        first_words = first.split()
+        # 뒤 셀이 매우 짧고 (3단어 이하), 앞 셀이 문장 종결이 아님
+        if len(last_words) <= 3 and len(first_words) >= 3:
+            if not any(first_stripped.endswith(e) for e in ko_endings):
+                return True
+    
+    # --- 패턴 5: 3개 이상 셀, 중간 셀이 매우 짧음 (줄바꿈으로 쪼개진 것) ---
+    if len(cells) >= 3:
+        mid_cells = cells[1:-1]
+        short_mids = sum(1 for c in mid_cells if len(c.split()) <= 2)
+        if short_mids >= len(mid_cells) * 0.5:
+            # 중간 셀 대부분이 1-2단어면 분할된 문장
+            combined = ' '.join(cells)
+            # 합쳤을 때 너무 짧지 않으면
+            if len(combined) > 20:
+                return True
+    
+    return False
 
 
 def extract_tables_from_page(doc, page_num: int = 0, debug: bool = False, **kwargs) -> List[Table]:
     """
     페이지에서 테이블 추출
+    
+    1차: 그리드 라인(수평/수직선) 기반 감지 (가장 정확)
+    2차: 텍스트 좌표 패턴 기반 감지 (폴백)
     """
     from .. import extract_text_with_positions, get_pages
     
@@ -493,12 +598,20 @@ def extract_tables_from_page(doc, page_num: int = 0, debug: bool = False, **kwar
     if page_num >= len(pages):
         return []
     
-    # 텍스트 추출 (이미 Top-Down으로 정규화됨)
     text_items = extract_text_with_positions(doc, page_num)
-    
     if not text_items:
         return []
     
+    # 1차: 그리드 기반 감지
+    try:
+        from .._grid_table import detect_tables_by_grid
+        grid_tables = detect_tables_by_grid(doc, page_num, text_items, debug=debug)
+        if grid_tables:
+            return grid_tables
+    except Exception:
+        pass
+    
+    # 2차: 텍스트 좌표 기반 감지 (기존 로직)
     return detect_tables(text_items, debug=debug, **kwargs)
 
 

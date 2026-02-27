@@ -753,6 +753,32 @@ def get_pages(doc: PDFDocument) -> list:
     return collect_pages(pages_ref)
 
 
+def _get_page_dimensions(doc: PDFDocument, page_num: int) -> tuple:
+    """
+    페이지 크기(width, height) 반환
+    
+    Args:
+        doc: PDFDocument 객체
+        page_num: 페이지 번호
+    
+    Returns:
+        (width, height) 튜플. 기본값 (595, 842) = A4
+    """
+    pages = get_pages(doc)
+    if page_num >= len(pages):
+        return 595.0, 842.0
+    
+    page = pages[page_num]
+    media_box = page.get('MediaBox', [0, 0, 595, 842])
+    try:
+        w = float(media_box[2]) - float(media_box[0])
+        h = float(media_box[3]) - float(media_box[1])
+    except (TypeError, IndexError, ValueError):
+        w, h = 595.0, 842.0
+    
+    return w, h
+
+
 def _build_font_map(doc: PDFDocument, page: dict) -> dict:
     """페이지의 폰트 정보 수집 (ToUnicode CMap 포함)"""
     font_map = {}
@@ -786,8 +812,12 @@ def _build_font_map(doc: PDFDocument, page: dict) -> dict:
         if isinstance(tounicode_ref, PDFRef):
             tounicode_obj = doc.objects.get((tounicode_ref.obj_num, tounicode_ref.gen_num))
             if tounicode_obj and '_stream_data' in tounicode_obj:
-                cmap_data = decode_stream(doc, tounicode_obj)
-                font_info.to_unicode = parse_tounicode_cmap(cmap_data)
+                try:
+                    cmap_data = decode_stream(doc, tounicode_obj)
+                    font_info.to_unicode = parse_tounicode_cmap(cmap_data)
+                except Exception:
+                    # CMap 디코딩 실패 시 해당 폰트만 스킵 (나머지 계속 진행)
+                    pass
         
         font_map[font_name] = font_info
     
@@ -822,14 +852,20 @@ def extract_text_with_positions(doc: PDFDocument, page_num: int = 0) -> list:
     if isinstance(contents_ref, PDFRef):
         contents_obj = doc.objects.get((contents_ref.obj_num, contents_ref.gen_num))
         if contents_obj:
-            content_stream = decode_stream(doc, contents_obj)
+            try:
+                content_stream = decode_stream(doc, contents_obj)
+            except Exception:
+                content_stream = b''
     elif isinstance(contents_ref, list):
         # 여러 Content Stream 합치기
         for ref in contents_ref:
             if isinstance(ref, PDFRef):
                 obj = doc.objects.get((ref.obj_num, ref.gen_num))
                 if obj:
-                    content_stream += decode_stream(doc, obj) + b'\n'
+                    try:
+                        content_stream += decode_stream(doc, obj) + b'\n'
+                    except Exception:
+                        pass
     
     if not content_stream:
         return []
@@ -932,23 +968,13 @@ def _clean_punctuation_spacing(text: str) -> str:
     return text
 
 
-def extract_text(doc: PDFDocument, page_num: int = 0) -> str:
+def _extract_text_single_column(items: list) -> str:
     """
-    특정 페이지에서 텍스트 추출
+    기존 1단 텍스트 추출 로직 (하위 호환용)
     
-    Args:
-        doc: PDFDocument 객체
-        page_num: 페이지 번호 (0부터 시작)
-    
-    Returns:
-        str: 추출된 텍스트 (읽기 순서로 정렬)
+    items는 이미 Top-Down으로 정규화된 TextItem 리스트.
+    Y→X 순 정렬 후 같은 Y(±5pt)를 한 줄로 합침.
     """
-    items = extract_text_with_positions(doc, page_num)
-    
-    if not items:
-        return ""
-    
-    # 이미 Top-Down으로 정규화되어 있으므로 Y 오름차순
     sorted_items = sorted(items, key=lambda t: (t.y, t.x))
     
     # 같은 줄의 글자들을 합치기
@@ -958,7 +984,6 @@ def extract_text(doc: PDFDocument, page_num: int = 0) -> str:
     
     for item in sorted_items:
         if current_y is None or abs(item.y - current_y) > 5:
-            # 새로운 줄
             if current_line:
                 lines.append(current_line)
             current_line = [item]
@@ -974,24 +999,43 @@ def extract_text(doc: PDFDocument, page_num: int = 0) -> str:
     for line in lines:
         line.sort(key=lambda t: t.x)
         
-        # 글자 간격 분석해서 단어 구분
+        # font_size가 비정상적으로 작으면(≤2pt) 실제 글자 간격에서 추정
+        line_font_size = max((item.font_size for item in line if item.text), default=1.0)
+        if line_font_size <= 2.0 and len(line) >= 3:
+            # 한글 연속 글자 간격의 중앙값으로 font_size 추정
+            cjk_gaps = []
+            for i in range(1, len(line)):
+                if line[i].text and line[i-1].text:
+                    prev_ch = line[i-1].text[-1]
+                    curr_ch = line[i].text[0]
+                    if ord(prev_ch) > 0x2E7F and ord(curr_ch) > 0x2E7F:
+                        gap = line[i].x - line[i-1].x
+                        if gap > 0:
+                            cjk_gaps.append(gap)
+            if cjk_gaps:
+                import statistics
+                line_font_size = statistics.median(cjk_gaps)
+        
         words = []
         current_word = ""
         prev_x = None
-        prev_width = None
         
         for item in line:
             text = item.text
             if not text:
                 continue
             
-            # 예상 글자 너비 (폰트 크기 기반 추정)
-            char_width = item.font_size * 0.6  # 대략적인 추정
+            effective_fs = max(item.font_size, line_font_size) if item.font_size <= 2.0 else item.font_size
             
             if prev_x is not None:
                 gap = item.x - prev_x
-                # 갭이 글자 너비의 1.5배 이상이면 단어 구분
-                threshold = char_width * 1.5
+                # 한글(CJK): char_width ≈ font_size, threshold = font_size * 1.2
+                # 영문: char_width ≈ font_size * 0.6, threshold = font_size * 0.9
+                prev_char = current_word[-1] if current_word else ''
+                if prev_char and ord(prev_char) > 0x2E7F:
+                    threshold = effective_fs * 1.2
+                else:
+                    threshold = effective_fs * 0.9
                 
                 if gap > threshold:
                     if current_word.strip():
@@ -1002,19 +1046,17 @@ def extract_text(doc: PDFDocument, page_num: int = 0) -> str:
             else:
                 current_word = text
             
-            # 한글/전각 문자와 영문/반각 문자 구분하여 텍스트 너비 추정
             text_width = 0
             for ch in text:
-                if ord(ch) > 0x2E7F:  # CJK/한글/전각 문자
-                    text_width += item.font_size * 0.9
+                if ord(ch) > 0x2E7F:
+                    text_width += effective_fs * 0.9
                 else:
-                    text_width += item.font_size * 0.45
-            prev_x = item.x + text_width  # 텍스트 끝 예상 위치
+                    text_width += effective_fs * 0.45
+            prev_x = item.x + text_width
         
         if current_word.strip():
             words.append(current_word)
         
-        # 단어 합치기: 이미 후행 공백이 있는 단어 처리
         if words:
             parts = []
             for w in words:
@@ -1028,7 +1070,445 @@ def extract_text(doc: PDFDocument, page_num: int = 0) -> str:
         if line_text.strip():
             result.append(line_text)
     
-    text = '\n'.join(result)
+    return '\n'.join(result)
+
+
+def _extract_page_lines(doc: PDFDocument, page_num: int):
+    """Content stream에서 수직/수평 라인(선) 추출 (표 경계 감지용)
+    
+    CTM(Current Transformation Matrix)을 추적하여 실제 페이지 좌표로 변환.
+    PDF content stream에서 `cm` 명령으로 좌표계가 변환된 후 
+    `0 0 m 486 0 l` 같은 상대 좌표로 선을 그리는 패턴을 처리.
+    """
+    import re as _re
+    pages_list = get_pages(doc)
+    if page_num >= len(pages_list):
+        return [], []
+    page = pages_list[page_num]
+    contents_ref = page.get('Contents')
+    cs = b''
+    if isinstance(contents_ref, PDFRef):
+        obj = doc.objects.get((contents_ref.obj_num, contents_ref.gen_num))
+        if obj:
+            try:
+                cs = decode_stream(doc, obj)
+            except Exception:
+                return [], []
+    elif isinstance(contents_ref, list):
+        for ref in contents_ref:
+            if isinstance(ref, PDFRef):
+                obj = doc.objects.get((ref.obj_num, ref.gen_num))
+                if obj:
+                    try:
+                        cs += decode_stream(doc, obj) + b'\n'
+                    except Exception:
+                        pass
+
+    h_lines = []  # (y, x_min, x_max) - PDF 좌표계
+    v_lines = []  # (x, y_min, y_max) - PDF 좌표계
+
+    # CTM 스택 추적
+    # CTM = [a, b, c, d, e, f] where:
+    # x' = a*x + c*y + e
+    # y' = b*x + d*y + f
+    ctm_stack = []
+    ctm = [1, 0, 0, 1, 0, 0]  # identity
+    
+    def apply_ctm(x, y):
+        """CTM을 적용하여 페이지 좌표로 변환"""
+        x2 = ctm[0] * x + ctm[2] * y + ctm[4]
+        y2 = ctm[1] * x + ctm[3] * y + ctm[5]
+        return x2, y2
+    
+    def multiply_ctm(new_ctm):
+        """현재 CTM에 새 변환 행렬을 곱함"""
+        a, b, c, d, e, f = ctm
+        a2, b2, c2, d2, e2, f2 = new_ctm
+        return [
+            a*a2 + b*c2, a*b2 + b*d2,
+            c*a2 + d*c2, c*b2 + d*d2,
+            e*a2 + f*c2 + e2, e*b2 + f*d2 + f2
+        ]
+    
+    # 토큰 단위로 파싱
+    text = cs.decode('latin-1', errors='replace')
+    
+    # q/Q (save/restore), cm, m, l, re, S/s/f/F 명령어 처리
+    cur_x, cur_y = 0.0, 0.0  # current point
+    
+    # 간단한 토큰 기반 파서
+    tokens = []
+    for tok in _re.finditer(rb'[-+]?\d*\.?\d+|[a-zA-Z*]+|\[|\]|\((?:[^\\)]|\\.)*\)|<[^>]*>', cs):
+        tokens.append(tok.group())
+    
+    num_stack = []
+    for tok in tokens:
+        # 숫자인지 확인
+        try:
+            num = float(tok)
+            num_stack.append(num)
+            continue
+        except (ValueError, UnicodeDecodeError):
+            pass
+        
+        op = tok.decode('latin-1', errors='replace') if isinstance(tok, bytes) else tok
+        
+        if op == 'q':
+            ctm_stack.append(ctm[:])
+        elif op == 'Q':
+            if ctm_stack:
+                ctm = ctm_stack.pop()
+        elif op == 'cm' and len(num_stack) >= 6:
+            new_ctm = num_stack[-6:]
+            ctm = multiply_ctm(new_ctm)
+            num_stack = num_stack[:-6]
+        elif op == 'm' and len(num_stack) >= 2:
+            cur_x, cur_y = num_stack[-2], num_stack[-1]
+            num_stack = num_stack[:-2]
+        elif op == 'l' and len(num_stack) >= 2:
+            lx, ly = num_stack[-2], num_stack[-1]
+            num_stack = num_stack[:-2]
+            # CTM 적용
+            px1, py1 = apply_ctm(cur_x, cur_y)
+            px2, py2 = apply_ctm(lx, ly)
+            if abs(py1 - py2) < 1:  # 수평선
+                h_lines.append((py1, min(px1, px2), max(px1, px2)))
+            elif abs(px1 - px2) < 1:  # 수직선
+                v_lines.append((px1, min(py1, py2), max(py1, py2)))
+            cur_x, cur_y = lx, ly
+        elif op == 're' and len(num_stack) >= 4:
+            rx, ry, rw, rh = num_stack[-4:]
+            num_stack = num_stack[:-4]
+            # 얇은 사각형 → 선으로 처리
+            if abs(rh) < 2 and abs(rw) > 5:  # 수평 사각형 → 수평선
+                px, py = apply_ctm(rx, ry + rh/2)
+                px2, _ = apply_ctm(rx + rw, ry + rh/2)
+                h_lines.append((py, min(px, px2), max(px, px2)))
+            elif abs(rw) < 2 and abs(rh) > 5:  # 수직 사각형 → 수직선
+                px, py = apply_ctm(rx + rw/2, ry)
+                _, py2 = apply_ctm(rx + rw/2, ry + rh)
+                v_lines.append((px, min(py, py2), max(py, py2)))
+        elif op in ('S', 's', 'f', 'F', 'B', 'b'):
+            pass  # stroke/fill - 이미 위에서 선 처리됨
+        else:
+            # 그 외 텍스트/기타 명령은 num_stack 초기화
+            if op in ('Tf', 'Td', 'TD', 'Tm', 'TJ', 'Tj', 'T*',
+                      'w', 'd', 'J', 'j', 'M', 'ri', 'gs',
+                      'g', 'G', 'rg', 'RG', 'k', 'K', 'cs', 'CS',
+                      'sc', 'SC', 'scn', 'SCN', 'Do', 'BT', 'ET',
+                      'n', 'W', 'h', 'c', 'v', 'y'):
+                num_stack.clear()
+
+    return h_lines, v_lines
+
+
+def _find_table_col_separator(v_lines, page_width):
+    """수직선에서 페이지 중앙 근처의 주요 열 분리선 X좌표를 반환.
+    
+    조건: 페이지 중앙 ±30% 이내, 3회 이상 출현, 총 span ≥ 200pt.
+    이 조건을 만족하는 X가 없으면 None 반환 (표 열 분리 없음).
+    """
+    if not v_lines:
+        return None
+
+    from collections import Counter
+    x_counts = Counter(round(l[0]) for l in v_lines)
+
+    center = page_width / 2
+    margin = page_width * 0.3
+    best = None
+
+    for x, cnt in x_counts.items():
+        if not (center - margin < x < center + margin):
+            continue
+        if cnt < 3:
+            continue
+        total_span = sum(l[2] - l[1] for l in v_lines if abs(round(l[0]) - x) < 2)
+        if total_span < 200:
+            continue
+        if best is None or total_span > best[1]:
+            best = (x, total_span)
+
+    return best[0] if best else None
+
+
+def _extract_text_table_columns(items, col_boundaries, h_lines, page_height, col_y_range=None):
+    """수직선이 존재하는 Y영역만 컬럼 분리, 나머지는 단일 컬럼 처리.
+    
+    - 본문 영역 (수직선 없음): 같은 Y줄의 좌/우 텍스트를 하나로 합침
+    - 대조표/표 영역 (수직선 있음): 행 단위로 좌→우 출력 (pymupdf 방식)
+    
+    Args:
+        items: TextItem 리스트
+        col_boundaries: 열 경계 X좌표 리스트 또는 단일 값
+        h_lines: 수평선 리스트
+        page_height: 페이지 높이
+        col_y_range: (y_top_td, y_bot_td) 수직선이 존재하는 Y범위
+    """
+    if not isinstance(col_boundaries, (list, tuple)):
+        col_boundaries = [col_boundaries]
+    col_boundaries = sorted(col_boundaries)
+    
+    if not col_boundaries or not items:
+        return _extract_text_single_column(items)
+    
+    # 컬럼 분리할 Y범위 결정
+    if col_y_range:
+        split_y_top, split_y_bot = col_y_range
+    else:
+        h_ys_pdf = sorted(set(round(l[1]) for l in h_lines))
+        if len(h_ys_pdf) < 3:
+            return _extract_text_single_column(items)
+        split_y_top = page_height - max(h_ys_pdf)
+        split_y_bot = page_height - min(h_ys_pdf)
+    
+    # 아이템을 3구간으로 분류
+    above, split_items, below = [], [], []
+    for item in items:
+        if item.y < split_y_top - 5:
+            above.append(item)
+        elif item.y > split_y_bot + 5:
+            below.append(item)
+        else:
+            split_items.append(item)
+    
+    parts = []
+    
+    # 상단: 일반 텍스트
+    if above:
+        parts.append(_extract_text_single_column(above))
+    
+    # 대조표/표 영역
+    if split_items:
+        # 행 경계 계산
+        h_ys_pdf = sorted(set(round(l[1]) for l in h_lines))
+        row_ys_td = sorted(set(
+            round(page_height - y) for y in h_ys_pdf
+            if split_y_top - 5 <= page_height - y <= split_y_bot + 5
+        ))
+        
+        # 행 내 셀에 여러 줄 텍스트가 있는지 감지
+        # 셀에 여러 줄이 있으면 행 단위 출력 시 컬럼이 섞이므로 컬럼 전체 단위 필요
+        has_multiline_cells = False
+        for r in range(len(row_ys_td) - 1):
+            rtop, rbot = row_ys_td[r], row_ys_td[r + 1]
+            row_items_check = [it for it in split_items if rtop - 1 <= it.y <= rbot + 1]
+            if not row_items_check:
+                continue
+            # 각 컬럼별 Y줄 수 확인
+            for ci in range(len(col_boundaries) + 1):
+                if ci == 0:
+                    col_items = [it for it in row_items_check if it.x < col_boundaries[0]]
+                elif ci < len(col_boundaries):
+                    col_items = [it for it in row_items_check if col_boundaries[ci-1] <= it.x < col_boundaries[ci]]
+                else:
+                    col_items = [it for it in row_items_check if it.x >= col_boundaries[-1]]
+                if len(col_items) >= 2:
+                    y_vals = set(round(it.y / 3) * 3 for it in col_items)
+                    if len(y_vals) >= 2:
+                        has_multiline_cells = True
+                        break
+            if has_multiline_cells:
+                break
+        
+        # 셀에 여러 줄 텍스트 → 컬럼 전체 단위 (행 단위면 섞임)
+        # 모든 셀이 한 줄 → 행 단위 (데이터 표에 적합)
+        use_row_by_row = len(row_ys_td) >= 3 and not has_multiline_cells
+        
+        if use_row_by_row:
+            # 행 경계가 있으면: 행 단위로 좌→우
+            # 각 아이템을 정확히 하나의 행에만 배정 (중복 방지)
+            assigned = set()
+            row_texts = []
+            for r in range(len(row_ys_td) - 1):
+                rtop = row_ys_td[r]
+                rbot = row_ys_td[r + 1]
+                row_items = []
+                for i, item in enumerate(split_items):
+                    if i in assigned:
+                        continue
+                    if rtop - 1 <= item.y <= rbot + 1:
+                        row_items.append(item)
+                        assigned.add(i)
+                
+                if not row_items:
+                    continue
+                
+                columns = [[] for _ in range(len(col_boundaries) + 1)]
+                
+                # 각 아이템을 개별적으로 x좌표 기반 컬럼 배정
+                for item in row_items:
+                    col_idx = len(col_boundaries)  # 마지막 열 기본
+                    for ci, b in enumerate(col_boundaries):
+                        if item.x < b:
+                            col_idx = ci
+                            break
+                    columns[col_idx].append(item)
+                
+                # 각 열별로 텍스트 추출 후 순서대로 합침
+                cell_texts = []
+                for col_items in columns:
+                    if col_items:
+                        ct = _extract_text_single_column(col_items).strip()
+                        if ct:
+                            cell_texts.append(ct)
+                
+                if cell_texts:
+                    row_texts.append('\n'.join(cell_texts))
+            
+            if row_texts:
+                parts.append('\n'.join(row_texts))
+        else:
+            # 행 경계 없으면: 컬럼 전체 단위
+            columns = [[] for _ in range(len(col_boundaries) + 1)]
+            for item in split_items:
+                placed = False
+                for ci, boundary in enumerate(col_boundaries):
+                    if item.x < boundary:
+                        columns[ci].append(item)
+                        placed = True
+                        break
+                if not placed:
+                    columns[-1].append(item)
+            
+            for col_items in columns:
+                if col_items:
+                    col_text = _extract_text_single_column(col_items)
+                    if col_text.strip():
+                        parts.append(col_text)
+    
+    # 하단: 일반 텍스트
+    if below:
+        parts.append(_extract_text_single_column(below))
+    
+    return '\n'.join(p for p in parts if p.strip())
+
+
+def extract_text(doc: PDFDocument, page_num: int = 0) -> str:
+    """
+    특정 페이지에서 텍스트 추출
+    
+    2단(multi-column) 레이아웃 감지 시 layout_analyzer를 사용하여
+    올바른 읽기 순서(left column → right column)로 텍스트를 반환합니다.
+    1단 문서는 기존 로직과 동일한 결과를 반환합니다.
+    
+    Args:
+        doc: PDFDocument 객체
+        page_num: 페이지 번호 (0부터 시작)
+    
+    Returns:
+        str: 추출된 텍스트 (읽기 순서로 정렬)
+    """
+    items = extract_text_with_positions(doc, page_num)
+    
+    if not items:
+        return ""
+    
+    page_w, page_h = _get_page_dimensions(doc, page_num)
+    
+    # ─────────────────────────────────────────────────────────
+    # 1차: 표 라인 기반 열 분리 (content stream의 수직선 감지)
+    #   "개정 전/개정 후" 같은 다중 열 표에서 컬럼별 텍스트 분리
+    # ─────────────────────────────────────────────────────────
+    try:
+        h_lines, v_lines = _extract_page_lines(doc, page_num)
+        col_sep = _find_table_col_separator(v_lines, page_w)
+        # 주요 수직선 경계 수집: 표 높이의 20% 이상을 관통하는 선만
+        inner_col_xs = []
+        if v_lines and h_lines:
+            from litparser._grid_table import _cluster_values
+            from collections import defaultdict
+            h_ys_pdf = sorted(set(round(l[1]) for l in h_lines))
+            table_height = max(h_ys_pdf) - min(h_ys_pdf) if len(h_ys_pdf) >= 2 else page_h
+            # X 클러스터별 총 높이 계산
+            x_heights = defaultdict(float)
+            for x, y0, y1 in v_lines:
+                x_key = round(x)
+                x_heights[x_key] += (y1 - y0)
+            # 표 높이의 20% 이상 관통 + 페이지 가장자리 제외
+            min_height = table_height * 0.2
+            for x_key, total_h in x_heights.items():
+                if total_h >= min_height and page_w * 0.12 < x_key < page_w * 0.88:
+                    inner_col_xs.append(float(x_key))
+            inner_col_xs = sorted(inner_col_xs)
+            
+            # ── 텍스트 crossing 검증 ──
+            # 텍스트가 경계를 60% 이상 가로지르면 가짜 경계(셀 병합)로 판단
+            # 외곽 수직선(가장 왼쪽/오른쪽)은 표의 구조적 경계이므로 항상 유지
+            if len(inner_col_xs) >= 3 and items:
+                from collections import defaultdict as _dd
+                h_ys_pdf_set = sorted(set(round(l[1]) for l in h_lines))
+                _ty_top = page_h - max(h_ys_pdf_set) if h_ys_pdf_set else 0
+                _ty_bot = page_h - min(h_ys_pdf_set) if h_ys_pdf_set else page_h
+                _titems = [it for it in items if _ty_top - 5 <= it.y <= _ty_bot + 5]
+                _ygroups = _dd(list)
+                for it in _titems:
+                    _ygroups[round(it.y / 3) * 3].append(it)
+                
+                _first = inner_col_xs[0]
+                _last = inner_col_xs[-1]
+                validated_xs = []
+                for bx in inner_col_xs:
+                    # 외곽 경계는 항상 유지
+                    if bx == _first or bx == _last:
+                        validated_xs.append(bx)
+                        continue
+                    crossing = 0
+                    total = 0
+                    for gy, group in _ygroups.items():
+                        if len(group) < 2:
+                            continue
+                        total += 1
+                        has_left = any(it.x < bx - 2 for it in group)
+                        has_right = any(it.x > bx + 2 for it in group)
+                        if has_left and has_right:
+                            crossing += 1
+                    # 60% 이상 crossing → 가짜 경계 제거
+                    if total > 0 and crossing > total * 0.6:
+                        continue
+                    validated_xs.append(bx)
+                inner_col_xs = validated_xs
+    except Exception:
+        h_lines, v_lines, col_sep, inner_col_xs = [], [], None, []
+    
+    if col_sep is not None and h_lines:
+        # col_sep 수직선이 커버하는 Y범위 (top-down) 계산
+        col_sep_y_top_td = page_h
+        col_sep_y_bot_td = 0
+        for x, y0, y1 in v_lines:
+            if abs(x - col_sep) < 5:
+                td_top = page_h - y1
+                td_bot = page_h - y0
+                col_sep_y_top_td = min(col_sep_y_top_td, td_top)
+                col_sep_y_bot_td = max(col_sep_y_bot_td, td_bot)
+        
+        col_boundaries = inner_col_xs if len(inner_col_xs) >= 2 else [col_sep]
+        col_y_range = (col_sep_y_top_td, col_sep_y_bot_td) if col_sep_y_bot_td > col_sep_y_top_td else None
+        text = _extract_text_table_columns(items, col_boundaries, h_lines, page_h, col_y_range)
+        text = _clean_punctuation_spacing(text)
+        return text
+    
+    # ─────────────────────────────────────────────────────────
+    # 2차: 레이아웃 분석 - 2단 이상이면 layout_analyzer 경유
+    # ─────────────────────────────────────────────────────────
+    # 최소 아이템 수: 아이템이 적으면 2단 감지가 false positive 날 수 있음
+    # (예: 5열 테이블 50개 아이템이 2단으로 잘못 감지)
+    # 실제 2단 문서는 한 페이지에 보통 100개 이상의 텍스트 아이템을 가짐
+    MIN_ITEMS_FOR_COLUMN_DETECT = 80
+    
+    layout = None
+    if len(items) >= MIN_ITEMS_FOR_COLUMN_DETECT:
+        try:
+            layout = analyze_layout(items, page_w, page_h)
+        except Exception:
+            layout = None
+    
+    if layout and layout.num_columns >= 2 and layout.blocks:
+        # 2단 이상: layout blocks의 reading order 순으로 텍스트 반환
+        text = '\n'.join(b.text for b in layout.blocks if b.text.strip())
+    else:
+        # 1단: 기존 로직 그대로 (하위 호환 보장)
+        text = _extract_text_single_column(items)
     
     # 후처리: 구두점/기호 주위 불필요한 공백 제거
     text = _clean_punctuation_spacing(text)

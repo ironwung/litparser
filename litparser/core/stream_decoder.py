@@ -64,11 +64,39 @@ class StreamDecoder:
     @staticmethod
     def decode_flate(data: bytes, params: dict = None) -> bytes:
         """FlateDecode (zlib) 압축 해제"""
+        decompressed = None
+        
+        # 1차: 표준 zlib (헤더 포함)
         try:
             decompressed = zlib.decompress(data)
         except zlib.error:
-            # 일부 PDF는 헤더 없이 raw deflate 사용
-            decompressed = zlib.decompress(data, -15)
+            pass
+        
+        # 2차: raw deflate (헤더 없음)
+        if decompressed is None:
+            try:
+                decompressed = zlib.decompress(data, -15)
+            except zlib.error:
+                pass
+        
+        # 3차: 잘린/손상된 스트림 부분 복구 (decompressobj 사용)
+        if decompressed is None:
+            for wbits in [15, -15, 47]:  # zlib, raw, gzip+auto
+                try:
+                    d = zlib.decompressobj(wbits)
+                    decompressed = d.decompress(data)
+                    # flush로 남은 데이터 시도 (실패해도 OK)
+                    try:
+                        decompressed += d.flush()
+                    except zlib.error:
+                        pass
+                    if decompressed:
+                        break
+                except zlib.error:
+                    continue
+        
+        if decompressed is None:
+            raise zlib.error("Failed to decompress FlateDecode stream")
         
         # Predictor 처리 (PNG 필터 등)
         if params:
