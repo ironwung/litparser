@@ -536,22 +536,21 @@ class ContentStreamParser:
         if font_info and font_info.to_unicode:
             return self._decode_with_cmap(raw_bytes, font_info.to_unicode)
         
-        # Identity-H/V 인코딩: 2바이트 = Unicode 코드포인트 (UTF-16BE)
-        if font_info and font_info.encoding in ('Identity-H', 'Identity-V'):
-            if len(raw_bytes) >= 2 and len(raw_bytes) % 2 == 0:
-                try:
-                    return raw_bytes.decode('utf-16-be')
-                except:
-                    pass
+        # CID/Identity 폰트: 2바이트 = Unicode 코드포인트 (UTF-16BE)
+        is_cid_font = (font_info and 
+                       (font_info.subtype == 'Type0' or 
+                        font_info.encoding in ('Identity-H', 'Identity-V')))
         
-        # Hex 문자열이고 2바이트 단위면 UTF-16BE 시도
-        if is_hex and len(raw_bytes) >= 2 and len(raw_bytes) % 2 == 0:
+        if is_cid_font and len(raw_bytes) >= 2 and len(raw_bytes) % 2 == 0:
             try:
-                # BOM 체크
-                if raw_bytes[:2] == b'\xfe\xff':
-                    return raw_bytes[2:].decode('utf-16-be')
-                # 일반 UTF-16BE 시도
                 return raw_bytes.decode('utf-16-be')
+            except:
+                pass
+        
+        # Hex 문자열이고 BOM이 있으면 UTF-16BE
+        if is_hex and len(raw_bytes) >= 4 and raw_bytes[:2] == b'\xfe\xff':
+            try:
+                return raw_bytes[2:].decode('utf-16-be')
             except:
                 pass
         

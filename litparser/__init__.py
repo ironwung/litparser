@@ -1232,18 +1232,13 @@ def _find_table_col_separator(v_lines, page_width):
     return best[0] if best else None
 
 
-def _extract_text_table_columns(items, col_boundaries, h_lines, page_height, col_y_range=None):
+def _extract_text_table_columns(items, col_boundaries, h_lines, page_height, col_y_range=None, v_lines=None, page_width=None):
     """수직선이 존재하는 Y영역만 컬럼 분리, 나머지는 단일 컬럼 처리.
     
-    - 본문 영역 (수직선 없음): 같은 Y줄의 좌/우 텍스트를 하나로 합침
-    - 대조표/표 영역 (수직선 있음): 행 단위로 좌→우 출력 (pymupdf 방식)
-    
-    Args:
-        items: TextItem 리스트
-        col_boundaries: 열 경계 X좌표 리스트 또는 단일 값
-        h_lines: 수평선 리스트
-        page_height: 페이지 높이
-        col_y_range: (y_top_td, y_bot_td) 수직선이 존재하는 Y범위
+    표 유형에 따라 두 가지 모드로 동작:
+    - 대조표 (컬럼 경계 1~2개): 좌 컬럼 전체 → 우 컬럼 전체
+    - 일반 표 (컬럼 경계 3개 이상): 행 단위 좌→우 순서
+      행 경계는 수직선 Y 끝점 기반으로 정확한 셀 경계를 사용
     """
     if not isinstance(col_boundaries, (list, tuple)):
         col_boundaries = [col_boundaries]
@@ -1278,110 +1273,161 @@ def _extract_text_table_columns(items, col_boundaries, h_lines, page_height, col
     if above:
         parts.append(_extract_text_single_column(above))
     
-    # 대조표/표 영역
+    # 표 영역 처리
     if split_items:
-        # 행 경계 계산
-        h_ys_pdf = sorted(set(round(l[1]) for l in h_lines))
-        row_ys_td = sorted(set(
-            round(page_height - y) for y in h_ys_pdf
-            if split_y_top - 5 <= page_height - y <= split_y_bot + 5
-        ))
+        is_comparison_table = len(col_boundaries) <= 2
         
-        # 행 내 셀에 여러 줄 텍스트가 있는지 감지
-        # 셀에 여러 줄이 있으면 행 단위 출력 시 컬럼이 섞이므로 컬럼 전체 단위 필요
-        has_multiline_cells = False
-        for r in range(len(row_ys_td) - 1):
-            rtop, rbot = row_ys_td[r], row_ys_td[r + 1]
-            row_items_check = [it for it in split_items if rtop - 1 <= it.y <= rbot + 1]
-            if not row_items_check:
-                continue
-            # 각 컬럼별 Y줄 수 확인
-            for ci in range(len(col_boundaries) + 1):
-                if ci == 0:
-                    col_items = [it for it in row_items_check if it.x < col_boundaries[0]]
-                elif ci < len(col_boundaries):
-                    col_items = [it for it in row_items_check if col_boundaries[ci-1] <= it.x < col_boundaries[ci]]
-                else:
-                    col_items = [it for it in row_items_check if it.x >= col_boundaries[-1]]
-                if len(col_items) >= 2:
-                    y_vals = set(round(it.y / 3) * 3 for it in col_items)
-                    if len(y_vals) >= 2:
-                        has_multiline_cells = True
-                        break
-            if has_multiline_cells:
-                break
-        
-        # 셀에 여러 줄 텍스트 → 컬럼 전체 단위 (행 단위면 섞임)
-        # 모든 셀이 한 줄 → 행 단위 (데이터 표에 적합)
-        use_row_by_row = len(row_ys_td) >= 3 and not has_multiline_cells
-        
-        if use_row_by_row:
-            # 행 경계가 있으면: 행 단위로 좌→우
-            # 각 아이템을 정확히 하나의 행에만 배정 (중복 방지)
-            assigned = set()
-            row_texts = []
-            for r in range(len(row_ys_td) - 1):
-                rtop = row_ys_td[r]
-                rbot = row_ys_td[r + 1]
-                row_items = []
-                for i, item in enumerate(split_items):
-                    if i in assigned:
-                        continue
-                    if rtop - 1 <= item.y <= rbot + 1:
-                        row_items.append(item)
-                        assigned.add(i)
-                
-                if not row_items:
-                    continue
-                
-                columns = [[] for _ in range(len(col_boundaries) + 1)]
-                
-                # 각 아이템을 개별적으로 x좌표 기반 컬럼 배정
-                for item in row_items:
-                    col_idx = len(col_boundaries)  # 마지막 열 기본
-                    for ci, b in enumerate(col_boundaries):
-                        if item.x < b:
-                            col_idx = ci
-                            break
-                    columns[col_idx].append(item)
-                
-                # 각 열별로 텍스트 추출 후 순서대로 합침
-                cell_texts = []
-                for col_items in columns:
-                    if col_items:
-                        ct = _extract_text_single_column(col_items).strip()
-                        if ct:
-                            cell_texts.append(ct)
-                
-                if cell_texts:
-                    row_texts.append('\n'.join(cell_texts))
+        if is_comparison_table:
+            # ── 대조표 모드: 좌 컬럼 전체 → 우 컬럼 전체 ──
+            num_cols = len(col_boundaries) + 1
+            columns = [[] for _ in range(num_cols)]
             
-            if row_texts:
-                parts.append('\n'.join(row_texts))
-        else:
-            # 행 경계 없으면: 컬럼 전체 단위
-            columns = [[] for _ in range(len(col_boundaries) + 1)]
             for item in split_items:
-                placed = False
-                for ci, boundary in enumerate(col_boundaries):
-                    if item.x < boundary:
-                        columns[ci].append(item)
-                        placed = True
+                col_idx = len(col_boundaries)
+                for ci, b in enumerate(col_boundaries):
+                    if item.x < b:
+                        col_idx = ci
                         break
-                if not placed:
-                    columns[-1].append(item)
+                columns[col_idx].append(item)
             
+            col_texts = []
             for col_items in columns:
                 if col_items:
-                    col_text = _extract_text_single_column(col_items)
-                    if col_text.strip():
-                        parts.append(col_text)
+                    ct = _extract_text_single_column(col_items).strip()
+                    if ct:
+                        col_texts.append(ct)
+            
+            if col_texts:
+                parts.append('\n'.join(col_texts))
+        else:
+            # ── 일반 표 모드: 행 단위 좌→우 순서 ──
+            # 행 경계: 수직선 Y 끝점 기반 (가장 정확한 셀 경계)
+            row_boundaries = _compute_row_boundaries_from_vlines(
+                v_lines, page_height, page_width, split_y_top, split_y_bot
+            ) if v_lines and page_width else []
+            
+            # v_lines 기반 행 경계가 부족하면 수평선/자동 행 경계로 fallback
+            if len(row_boundaries) < 3:
+                h_ys_pdf = sorted(set(round(l[1]) for l in h_lines))
+                row_ys_td = sorted(set(
+                    round(page_height - y) for y in h_ys_pdf
+                    if split_y_top - 5 <= page_height - y <= split_y_bot + 5
+                ))
+                auto_boundaries = _compute_row_boundaries_from_items(split_items)
+                
+                if len(row_ys_td) >= 3 and len(row_ys_td) >= len(auto_boundaries):
+                    row_boundaries = row_ys_td
+                elif len(auto_boundaries) >= 2:
+                    row_boundaries = auto_boundaries
+                else:
+                    row_boundaries = row_ys_td if len(row_ys_td) >= 2 else auto_boundaries
+            
+            if len(row_boundaries) >= 2:
+                assigned = set()
+                row_texts = []
+                for r in range(len(row_boundaries) - 1):
+                    rtop = row_boundaries[r]
+                    rbot = row_boundaries[r + 1]
+                    row_items = []
+                    for i, item in enumerate(split_items):
+                        if i in assigned:
+                            continue
+                        if rtop - 1 <= item.y <= rbot + 1:
+                            row_items.append(item)
+                            assigned.add(i)
+                    
+                    if not row_items:
+                        continue
+                    
+                    columns = [[] for _ in range(len(col_boundaries) + 1)]
+                    for item in row_items:
+                        col_idx = len(col_boundaries)
+                        for ci, b in enumerate(col_boundaries):
+                            if item.x < b:
+                                col_idx = ci
+                                break
+                        columns[col_idx].append(item)
+                    
+                    # 희소 컬럼 병합: 아이템이 적은(<=2) 컬럼을 좌측 인접 컬럼에 합침
+                    # (텍스트가 컬럼 경계를 약간 넘어가는 경우 보정)
+                    for ci in range(len(columns) - 1, 0, -1):
+                        if len(columns[ci]) <= 2 and len(columns[ci - 1]) > 2:
+                            columns[ci - 1].extend(columns[ci])
+                            columns[ci] = []
+                    
+                    cell_texts = []
+                    for col_items in columns:
+                        if col_items:
+                            ct = _extract_text_single_column(col_items).strip()
+                            if ct:
+                                # 셀 내부 줄바꿈을 공백으로 치환 (셀 간 구분만 \n 사용)
+                                ct = ' '.join(ct.split('\n'))
+                                cell_texts.append(ct)
+                    
+                    if cell_texts:
+                        row_texts.append('\n'.join(cell_texts))
+                
+                remaining = [split_items[i] for i in range(len(split_items)) if i not in assigned]
+                if remaining:
+                    row_texts.append(_extract_text_single_column(remaining).strip())
+                
+                if row_texts:
+                    parts.append('\n'.join(row_texts))
+            else:
+                parts.append(_extract_text_single_column(split_items))
     
     # 하단: 일반 텍스트
     if below:
         parts.append(_extract_text_single_column(below))
     
     return '\n'.join(p for p in parts if p.strip())
+
+
+def _compute_row_boundaries_from_vlines(v_lines, page_height, page_width, split_y_top, split_y_bot):
+    """수직선 Y 끝점으로 행 경계 계산. 표의 실제 셀 경계와 정확히 일치."""
+    if not v_lines or not page_width:
+        return []
+    
+    v_endpoints = set()
+    for x, y0, y1 in v_lines:
+        xk = round(x)
+        if page_width * 0.12 < xk < page_width * 0.88:
+            td0 = round(page_height - y0)
+            td1 = round(page_height - y1)
+            if split_y_top - 5 <= td0 <= split_y_bot + 5:
+                v_endpoints.add(td0)
+            if split_y_top - 5 <= td1 <= split_y_bot + 5:
+                v_endpoints.add(td1)
+    
+    return sorted(v_endpoints)
+
+
+def _compute_row_boundaries_from_items(items):
+    """수평선이 없을 때 아이템 Y좌표 기반으로 행 경계를 자동 계산.
+    
+    Y좌표를 정렬 후 큰 갭(>= font_size * 1.5)을 행 경계로 사용.
+    """
+    if not items:
+        return []
+    
+    # 평균 폰트 크기 계산
+    font_sizes = [getattr(it, 'font_size', 10) or 10 for it in items]
+    avg_fs = sum(font_sizes) / len(font_sizes)
+    gap_threshold = avg_fs * 1.5
+    
+    # Y좌표 수집 및 정렬
+    y_vals = sorted(set(round(it.y, 1) for it in items))
+    if len(y_vals) < 2:
+        return [min(it.y for it in items) - 1, max(it.y for it in items) + avg_fs + 1]
+    
+    boundaries = [y_vals[0] - 1]
+    for i in range(1, len(y_vals)):
+        if y_vals[i] - y_vals[i-1] > gap_threshold:
+            # 갭 중간점을 경계로
+            boundaries.append((y_vals[i-1] + y_vals[i]) / 2)
+    boundaries.append(y_vals[-1] + avg_fs + 1)
+    
+    return boundaries
 
 
 def extract_text(doc: PDFDocument, page_num: int = 0) -> str:
@@ -1472,6 +1518,12 @@ def extract_text(doc: PDFDocument, page_num: int = 0) -> str:
         h_lines, v_lines, col_sep, inner_col_xs = [], [], None, []
     
     if col_sep is not None and h_lines:
+        # 표 판정 강화: v_lines가 h_lines보다 과도하게 많으면 표가 아님 (코드 Listing 등)
+        # 일반 표: h_lines와 v_lines가 비슷한 비율
+        if len(v_lines) > len(h_lines) * 10 and len(h_lines) < 15:
+            col_sep = None  # 표가 아닌 것으로 판정
+    
+    if col_sep is not None and h_lines:
         # col_sep 수직선이 커버하는 Y범위 (top-down) 계산
         col_sep_y_top_td = page_h
         col_sep_y_bot_td = 0
@@ -1484,17 +1536,15 @@ def extract_text(doc: PDFDocument, page_num: int = 0) -> str:
         
         col_boundaries = inner_col_xs if len(inner_col_xs) >= 2 else [col_sep]
         col_y_range = (col_sep_y_top_td, col_sep_y_bot_td) if col_sep_y_bot_td > col_sep_y_top_td else None
-        text = _extract_text_table_columns(items, col_boundaries, h_lines, page_h, col_y_range)
+        text = _extract_text_table_columns(items, col_boundaries, h_lines, page_h, col_y_range, v_lines=v_lines, page_width=page_w)
         text = _clean_punctuation_spacing(text)
         return text
     
     # ─────────────────────────────────────────────────────────
     # 2차: 레이아웃 분석 - 2단 이상이면 layout_analyzer 경유
     # ─────────────────────────────────────────────────────────
-    # 최소 아이템 수: 아이템이 적으면 2단 감지가 false positive 날 수 있음
-    # (예: 5열 테이블 50개 아이템이 2단으로 잘못 감지)
-    # 실제 2단 문서는 한 페이지에 보통 100개 이상의 텍스트 아이템을 가짐
-    MIN_ITEMS_FOR_COLUMN_DETECT = 80
+    # 최소 아이템 수: 아이템이 너무 적으면 2단 감지 불가
+    MIN_ITEMS_FOR_COLUMN_DETECT = 40
     
     layout = None
     if len(items) >= MIN_ITEMS_FOR_COLUMN_DETECT:
