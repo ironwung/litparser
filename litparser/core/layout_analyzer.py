@@ -308,15 +308,18 @@ def _find_two_column_region(items: List['BoxedItem'], page_width: float, page_he
             if abs(px - peak1_x) >= gap_min_width and cnt >= peak1_cnt * 0.15:
                 left_peak = min(peak1_x, px)
                 right_peak = max(peak1_x, px)
-                # 두 피크 사이를 갭으로
-                # 좌측 끝: left_peak + margin, 우측 시작: right_peak - margin
                 margin = bin_size * 2
                 cluster_gap_left = left_peak + margin
                 cluster_gap_right = right_peak - margin
                 if cluster_gap_right > cluster_gap_left:
-                    gw = cluster_gap_right - cluster_gap_left
-                    gaps.append((int(cluster_gap_left / bin_size), 
-                                int(cluster_gap_right / bin_size), gw))
+                    # 갭 영역에 아이템이 많으면 진짜 갭이 아님
+                    gap_area_items = sum(1 for b in body_items 
+                                        if cluster_gap_left <= b.x0 <= cluster_gap_right)
+                    gap_density = gap_area_items / len(body_items) if body_items else 1
+                    if gap_density < 0.15:  # 갭 영역에 아이템 15% 미만만 허용
+                        gw = cluster_gap_right - cluster_gap_left
+                        gaps.append((int(cluster_gap_left / bin_size), 
+                                    int(cluster_gap_right / bin_size), gw))
                 break
     
     if not gaps:
@@ -333,8 +336,13 @@ def _find_two_column_region(items: List['BoxedItem'], page_width: float, page_he
         g_right = gap[1] * bin_size
         gap_w = g_right - g_left
         
-        # 갭 폭이 페이지 폭의 15% 미만이면 2단이 아님 (표/양식의 좁은 갭 제외)
-        if gap_w < page_width * 0.15:
+        # 갭 폭이 페이지 폭의 12% 미만이면 2단이 아님 (표/양식의 좁은 갭 제외)
+        if gap_w < page_width * 0.12:
+            continue
+        
+        # 갭 영역에 아이템이 많으면 진짜 갭이 아님 (1단 워드랩)
+        gap_area_items = sum(1 for b in body_items if g_left <= b.x0 <= g_right)
+        if total_items > 0 and gap_area_items > total_items * 0.15:
             continue
         
         # アイテムx0基準でバランスチェック（ラインスタートでは検出できないケース対応）

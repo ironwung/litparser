@@ -602,7 +602,7 @@ def extract_tables_from_page(doc, page_num: int = 0, debug: bool = False, **kwar
     if not text_items:
         return []
     
-    # 1차: 그리드 기반 감지
+    # 1차: 그리드 기반 감지 (수평선 + 수직선 모두 있는 표)
     try:
         from .._grid_table import detect_tables_by_grid
         grid_tables = detect_tables_by_grid(doc, page_num, text_items, debug=debug)
@@ -610,6 +610,49 @@ def extract_tables_from_page(doc, page_num: int = 0, debug: bool = False, **kwar
             return grid_tables
     except Exception:
         pass
+    
+    # 1.5차: 수평선 기반 borderless 표 감지 (수평선은 있지만 수직선 없는 표)
+    hline_tables = []
+    try:
+        from .. import _extract_page_lines, _get_page_dimensions
+        from .._grid_table import _detect_hline_tables
+        h_lines, v_lines = _extract_page_lines(doc, page_num)
+        if len(h_lines) >= 3:
+            page_w, page_h = _get_page_dimensions(doc, page_num)
+            hline_tables = _detect_hline_tables(h_lines, text_items, page_w, page_h, debug)
+    except Exception:
+        pass
+    
+    # 1.7차: 텍스트 x좌표 정렬 기반 표 감지 (선 없는 표)
+    align_tables = []
+    try:
+        from .._grid_table import detect_tables_by_alignment
+        from .. import _get_page_dimensions
+        pw, ph = _get_page_dimensions(doc, page_num)
+        align_tables = detect_tables_by_alignment(text_items, debug=debug, 
+                                                   page_width=pw, page_height=ph)
+    except Exception:
+        pass
+    
+    # hline과 alignment 결과 중 더 나은 것 선택
+    # 기준: 더 큰 표(셀 수)를 우선
+    all_found = hline_tables + align_tables
+    if all_found:
+        # 겹치는 표 제거 (Y범위 50%+ 겹치면 큰 표만 유지)
+        all_found.sort(key=lambda t: len(t.cells), reverse=True)
+        filtered = []
+        for t in all_found:
+            overlap = False
+            for existing in filtered:
+                y_ov = max(0, min(t.y + t.height, existing.y + existing.height) - max(t.y, existing.y))
+                min_h = min(t.height, existing.height) if min(t.height, existing.height) > 0 else 1
+                if y_ov > min_h * 0.3:
+                    overlap = True
+                    break
+            if not overlap:
+                filtered.append(t)
+        if filtered:
+            return filtered
     
     # 2차: 텍스트 좌표 기반 감지 (기존 로직)
     return detect_tables(text_items, debug=debug, **kwargs)
