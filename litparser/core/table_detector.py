@@ -40,6 +40,7 @@ class Table:
     height: float = 0
     caption: str = ""
     method: str = ""
+    page: int = 0
     
     def to_list(self) -> List[List[str]]:
         """2D 리스트로 변환"""
@@ -602,6 +603,17 @@ def extract_tables_from_page(doc, page_num: int = 0, debug: bool = False, **kwar
     if not text_items:
         return []
     
+    tables = _extract_tables_internal(doc, page_num, text_items, debug, **kwargs)
+    
+    # 모든 표에 page 번호 설정 (1-based)
+    for t in tables:
+        t.page = page_num + 1
+    
+    return tables
+
+
+def _extract_tables_internal(doc, page_num, text_items, debug=False, **kwargs) -> List[Table]:
+    
     # 1차: 그리드 기반 감지 (수평선 + 수직선 모두 있는 표)
     try:
         from .._grid_table import detect_tables_by_grid
@@ -638,15 +650,20 @@ def extract_tables_from_page(doc, page_num: int = 0, debug: bool = False, **kwar
     # 기준: 더 큰 표(셀 수)를 우선
     all_found = hline_tables + align_tables
     if all_found:
-        # 겹치는 표 제거 (Y범위 50%+ 겹치면 큰 표만 유지)
+        # 겹치는 표 제거 (Y+X 범위 모두 겹치면 큰 표만 유지)
         all_found.sort(key=lambda t: len(t.cells), reverse=True)
         filtered = []
         for t in all_found:
             overlap = False
             for existing in filtered:
+                # Y범위 겹침
                 y_ov = max(0, min(t.y + t.height, existing.y + existing.height) - max(t.y, existing.y))
                 min_h = min(t.height, existing.height) if min(t.height, existing.height) > 0 else 1
-                if y_ov > min_h * 0.3:
+                # X범위 겹침
+                x_ov = max(0, min(t.x + t.width, existing.x + existing.width) - max(t.x, existing.x))
+                min_w = min(t.width, existing.width) if min(t.width, existing.width) > 0 else 1
+                # Y와 X 모두 30%+ 겹쳐야 같은 표
+                if y_ov > min_h * 0.3 and x_ov > min_w * 0.3:
                     overlap = True
                     break
             if not overlap:
