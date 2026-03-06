@@ -697,50 +697,46 @@ def detect_tables_by_alignment(text_items: list, debug: bool = False,
     if not text_items or len(text_items) < 8:
         return []
     
-    # 2단 레이아웃 감지
+    # 2단 분리: 페이지 중앙 30~70% 범위에서 가장 큰 x좌표 갭 찾기
     split_x = None
-    
-    # layout_analyzer의 _find_two_column_region 활용
-    if page_width > 0 and page_height > 0:
-        try:
-            from .core.layout_analyzer import _to_boxed_item, _find_two_column_region
-            boxed = [_to_boxed_item(it) for it in text_items]
-            col_info, _ = _find_two_column_region(boxed, page_width, page_height)
-            if col_info['num_columns'] >= 2:
-                split_x = col_info['gap_right']
-                if debug:
-                    print(f"[Align] 2-col from layout: split_x={split_x:.0f}")
-        except Exception:
-            pass
-    
-    # layout 정보 없으면 x좌표 갭으로 감지
-    if split_x is None:
+    if page_width > 0:
         from collections import Counter
         x_bins = Counter(round(it.x / 10) * 10 for it in text_items)
         sorted_xs = sorted(x_bins.keys())
         
+        center_min = page_width * 0.25
+        center_max = page_width * 0.75
         max_gap = 0
         for i in range(len(sorted_xs) - 1):
-            gap = sorted_xs[i + 1] - sorted_xs[i]
-            if gap > max_gap and gap >= 40:
+            gap_start = sorted_xs[i]
+            gap_end = sorted_xs[i + 1]
+            gap = gap_end - gap_start
+            gap_mid = (gap_start + gap_end) / 2
+            # 갭이 페이지 중앙 근처(25~75%)에 있고 30pt+ 이면
+            if gap >= 30 and center_min <= gap_mid <= center_max and gap > max_gap:
                 max_gap = gap
-                split_x = (sorted_xs[i] + sorted_xs[i + 1]) / 2
+                split_x = (gap_start + gap_end) / 2
     
-    if split_x:
+    if split_x and max_gap >= 30:
         left_items = [it for it in text_items if it.x < split_x]
         right_items = [it for it in text_items if it.x >= split_x]
         
-        if debug:
-            print(f"[Align] split at x={split_x:.0f} L={len(left_items)} R={len(right_items)}")
-        
-        tables = []
-        for side_items, label in [(left_items, 'L'), (right_items, 'R')]:
-            if len(side_items) >= 6:
+        # 양쪽 모두 최소 아이템이 있어야 분리
+        if len(left_items) >= 10 and len(right_items) >= 10:
+            if debug:
+                print(f"[Align] split at x={split_x:.0f} (gap={max_gap:.0f}) L={len(left_items)} R={len(right_items)}")
+            
+            tables = []
+            for side_items, label in [(left_items, 'L'), (right_items, 'R')]:
                 side_tables = _detect_aligned_tables_in_region(side_items, debug, label)
                 tables.extend(side_tables)
-        return tables
-    else:
-        return _detect_aligned_tables_in_region(text_items, debug, '')
+            
+            # 분리 후 결과가 있으면 반환, 없으면 전체로 시도
+            if tables:
+                return tables
+    
+    # 분리 안 하거나 분리 후 결과 없으면 전체로
+    return _detect_aligned_tables_in_region(text_items, debug, '')
 
 
 def _detect_aligned_tables_in_region(text_items: list, debug: bool, 

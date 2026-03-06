@@ -943,27 +943,31 @@ def _detect_coordinate_direction(text_items: list) -> bool:
 def _clean_punctuation_spacing(text: str) -> str:
     """
     PDF 텍스트 추출 후 구두점/기호 주위의 불필요한 공백을 정리
-    
-    한글 PDF에서 각 텍스트 아이템이 후행 공백을 포함하여
-    구두점 앞에 불필요한 공백이 생기는 문제를 해결
+    + ligature(fi, fl, ff) 분리 복원
     """
     import re
     
-    # 1. 구두점 앞 공백 제거: "했다 ." → "했다."  "법무부 ," → "법무부,"
+    # 0. Ligature 복원: PDF에서 fi/fl/ff ligature가 분리되는 경우
+    # "Veri f ication" → "Verification" (f 앞뒤에 공백)
+    # 순서: ffi/ffl → ff → fi → fl (긴 패턴 먼저)
+    text = re.sub(r'(?<=[a-zA-Z]) f f i(?=[a-zA-Z.])', 'ffi', text)
+    text = re.sub(r'(?<=[a-zA-Z]) f f l(?=[a-zA-Z.])', 'ffl', text)
+    text = re.sub(r'(?<=[a-zA-Z]) f f (?=[a-zA-Z])', 'ff', text)
+    text = re.sub(r'(?<=[a-zA-Z]) f i(?=[a-zA-Z.])', 'fi', text)
+    text = re.sub(r'(?<=[a-zA-Z]) f l(?=[a-zA-Z.])', 'fl', text)
+    
+    # 1. 구두점 앞 공백 제거
     text = re.sub(r' ([,.\!?;:])', r'\1', text)
     
-    # 2. 닫는 괄호/따옴표 류 앞 공백 제거: "시행계획 」" → "시행계획」"
+    # 2. 닫는 괄호/따옴표 류 앞 공백 제거
     text = re.sub(r' ([」\)）\]】』"\'\'`」])', r'\1', text)
     
-    # 3. 여는 괄호/따옴표 류 뒤 공백 제거: 「 '26년 → 「'26년  ( 이하 → (이하
+    # 3. 여는 괄호/따옴표 류 뒤 공백 제거
     text = re.sub(r'([「\(（\[【『"\'\'`]]) ', r'\1', text)
     
-    # 4. 가운뎃점(·) 앞뒤 공백 제거: "수립 ·의결" → "수립·의결"
+    # 4. 가운뎃점(·) 앞뒤 공백 제거
     text = re.sub(r' ·', '·', text)
     text = re.sub(r'· ', '·', text)
-    
-    # 5. 붙임표(-) 앞뒤 공백 - 단어 사이의 하이픈만 (줄 시작 - 제외)
-    # "치료 ·사회재활" 같은 패턴은 4번에서 처리됨
     
     return text
 
@@ -1597,7 +1601,11 @@ def extract_tables(doc: PDFDocument, page_num: int = 0, **kwargs) -> list:
             print(table.to_markdown())
     """
     from .core.table_detector import extract_tables_from_page
-    return extract_tables_from_page(doc, page_num, **kwargs)
+    tables = extract_tables_from_page(doc, page_num, **kwargs)
+    # 페이지 번호 설정 (1-based, pymupdf와 동일)
+    for t in tables:
+        t.page = page_num + 1
+    return tables
 
 
 def get_document_outline(doc: PDFDocument) -> list:
