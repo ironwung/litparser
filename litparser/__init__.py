@@ -154,6 +154,7 @@ def parse(
             tables = extract_tables(doc, page_num)
             for t in tables:
                 table_data = {
+                    'page': page_num + 1,
                     'rows': t.rows,
                     'cols': t.cols,
                     'data': t.to_list(),
@@ -162,22 +163,27 @@ def parse(
                 page_data['tables'].append(table_data)
                 result.tables.append(table_data)
             
+            # 이미지 (페이지별)
+            if include_images:
+                try:
+                    page_images = extract_images(doc, page_num)
+                    for img in page_images:
+                        img_data = {
+                            'page': page_num + 1,
+                            'width': img.width,
+                            'height': img.height,
+                            'format': img.color_space,
+                        }
+                        if img.data:
+                            img_data['base64'] = base64.b64encode(img.data).decode('ascii')
+                        page_data['images'].append(img_data)
+                        result.images.append(img_data)
+                except:
+                    pass
+            
             result.pages.append(page_data)
         
         result.text = "\n\n".join(all_text)
-        
-        # 이미지
-        if include_images:
-            images = extract_images(doc)
-            for img in images:
-                img_data = {
-                    'width': img.width,
-                    'height': img.height,
-                    'format': img.color_space,
-                }
-                if img.data:
-                    img_data['base64'] = base64.b64encode(img.data).decode('ascii')
-                result.images.append(img_data)
         
         # 개요
         try:
