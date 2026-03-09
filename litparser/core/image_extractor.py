@@ -54,6 +54,29 @@ def extract_images(doc, page_num: int = None) -> List[PDFImage]:
     """
     from . import PDFRef
     
+    # 특정 페이지 지정 시, 해당 페이지의 이미지 XObject ref만 수집
+    page_image_refs = None
+    if page_num is not None:
+        page_image_refs = set()
+        try:
+            from . import get_pages
+            pages = get_pages(doc)
+            if page_num < len(pages):
+                page = pages[page_num]
+                resources = page.get('Resources', {})
+                if isinstance(resources, PDFRef):
+                    resources = doc.objects.get((resources.obj_num, resources.gen_num), {})
+                if isinstance(resources, dict):
+                    xobjects = resources.get('XObject', {})
+                    if isinstance(xobjects, PDFRef):
+                        xobjects = doc.objects.get((xobjects.obj_num, xobjects.gen_num), {})
+                    if isinstance(xobjects, dict):
+                        for name, ref in xobjects.items():
+                            if isinstance(ref, PDFRef):
+                                page_image_refs.add((ref.obj_num, ref.gen_num))
+        except:
+            page_image_refs = None  # 실패하면 전체 추출
+    
     images = []
     
     # 이미지 XObject 찾기
@@ -64,6 +87,11 @@ def extract_images(doc, page_num: int = None) -> List[PDFImage]:
         subtype = obj.get('Subtype')
         if subtype != 'Image':
             continue
+        
+        # 페이지별 필터링
+        if page_image_refs is not None:
+            if (obj_num, gen_num) not in page_image_refs:
+                continue
         
         # 이미지 정보 추출
         width = obj.get('Width', 0)
