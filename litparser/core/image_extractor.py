@@ -41,6 +41,46 @@ class PDFImage:
         return 'unknown'
 
 
+def _collect_image_refs_recursive(doc, container, image_refs: set, PDFRef, visited=None):
+    """
+    페이지/Form XObject에서 이미지 참조를 재귀적으로 수집.
+    Form XObject 안에 중첩된 이미지도 찾음.
+    """
+    if visited is None:
+        visited = set()
+    
+    resources = container.get('Resources', {})
+    if isinstance(resources, PDFRef):
+        resources = doc.objects.get((resources.obj_num, resources.gen_num), {})
+    if not isinstance(resources, dict):
+        return
+    
+    xobjects = resources.get('XObject', {})
+    if isinstance(xobjects, PDFRef):
+        xobjects = doc.objects.get((xobjects.obj_num, xobjects.gen_num), {})
+    if not isinstance(xobjects, dict):
+        return
+    
+    for name, ref in xobjects.items():
+        if not isinstance(ref, PDFRef):
+            continue
+        key = (ref.obj_num, ref.gen_num)
+        if key in visited:
+            continue
+        visited.add(key)
+        
+        obj = doc.objects.get(key)
+        if not isinstance(obj, dict):
+            continue
+        
+        subtype = obj.get('Subtype', '')
+        if subtype == 'Image':
+            image_refs.add(key)
+        elif subtype == 'Form':
+            # Form XObject 안을 재귀 탐색
+            _collect_image_refs_recursive(doc, obj, image_refs, PDFRef, visited)
+
+
 def extract_images(doc, page_num: int = None) -> List[PDFImage]:
     """
     PDF에서 이미지 추출
@@ -55,27 +95,18 @@ def extract_images(doc, page_num: int = None) -> List[PDFImage]:
     from . import PDFRef
     
     # 특정 페이지 지정 시, 해당 페이지의 이미지 XObject ref만 수집
+    # Form XObject 안에 중첩된 이미지도 재귀적으로 찾음
     page_image_refs = None
     if page_num is not None:
         page_image_refs = set()
         try:
-            from . import get_pages
+            from .. import get_pages
             pages = get_pages(doc)
             if page_num < len(pages):
                 page = pages[page_num]
-                resources = page.get('Resources', {})
-                if isinstance(resources, PDFRef):
-                    resources = doc.objects.get((resources.obj_num, resources.gen_num), {})
-                if isinstance(resources, dict):
-                    xobjects = resources.get('XObject', {})
-                    if isinstance(xobjects, PDFRef):
-                        xobjects = doc.objects.get((xobjects.obj_num, xobjects.gen_num), {})
-                    if isinstance(xobjects, dict):
-                        for name, ref in xobjects.items():
-                            if isinstance(ref, PDFRef):
-                                page_image_refs.add((ref.obj_num, ref.gen_num))
+                _collect_image_refs_recursive(doc, page, page_image_refs, PDFRef)
         except:
-            page_image_refs = None  # 실패하면 전체 추출
+            page_image_refs = None
     
     images = []
     
