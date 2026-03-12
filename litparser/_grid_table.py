@@ -160,28 +160,30 @@ def _build_grid_table_from_region(v_lines, h_lines, text_items,
     v_max_td = max(page_h - y0 for x, y0, y1 in v_lines)
     last_hline_td = row_ys_td[-1] if row_ys_td else 0
     
-    # 마지막 수평선 아래 텍스트 검색 (표 x범위 내, 최대 100pt 아래까지)
+    # 마지막 수평선 아래 텍스트 검색 (수평선 Y + 3pt 이후만, 최대 50pt)
+    import re as _re_grid
     below_items = [it for it in text_items
-                   if last_hline_td < it.y < last_hline_td + 100 
-                   and col_xs[0] - 5 <= it.x <= col_xs[-1] + 5]
+                   if last_hline_td + 3 < it.y < last_hline_td + 50 
+                   and col_xs[0] - 5 <= it.x <= col_xs[-1] + 5
+                   and not _re_grid.match(r'^-\s*\d+\s*-$', it.text.strip())]
     
     if below_items:
-        # 텍스트 행별로 그룹화
         from collections import defaultdict
         y_groups_below = defaultdict(list)
         for it in below_items:
             y_key = round(it.y / 5) * 5
             y_groups_below[y_key].append(it)
         
-        # 연속적인 텍스트 행을 추가 (큰 갭이 나오면 중단)
         prev_y = last_hline_td
         for yk in sorted(y_groups_below.keys()):
-            if yk - prev_y > 40:  # 40pt 이상 갭이면 표 종료
+            if yk - prev_y > 30:
+                break
+            row_text = ' '.join(it.text.strip() for it in y_groups_below[yk]).strip()
+            if _re_grid.match(r'^-\s*\d+\s*-$', row_text):
                 break
             row_ys_td.append(yk)
             prev_y = yk
         
-        # 마지막 텍스트 행의 하단 경계
         if len(row_ys_td) > len(row_ys_pdf) + 1:
             row_ys_td.append(prev_y + 15)
     
@@ -257,6 +259,57 @@ def _build_grid_table_from_region(v_lines, h_lines, text_items,
         height=row_ys_td[-1] - row_ys_td[0],
         method='grid'
     )
+    
+    # 후처리 1: 첫 행이 수평선 바깥의 본문이면 제거
+    # 첫 수평선 Y(top-down)보다 위에 있는 텍스트만으로 구성된 첫 행 제거
+    if num_rows >= 2 and len(row_ys_pdf) >= 2:
+        first_hline_td = row_ys_td[0]  # 첫 수평선 = 첫 행 경계
+        first_row_cells = [c for c in cells if c.row == 0]
+        first_row_nonempty = [c for c in first_row_cells if c.text.strip()]
+        
+        if first_row_nonempty:
+            # 첫 행의 텍스트가 모두 수평선 위에만 있는지 검사
+            # text_items에서 첫 행 영역 내의 아이템 Y를 확인
+            first_row_items = [it for it in text_items
+                              if first_hline_td - 5 <= it.y <= row_ys_td[1] + 3
+                              and col_xs[0] - 3 <= it.x <= col_xs[-1] + 3]
+            above_line_items = [it for it in first_row_items if it.y < first_hline_td]
+            below_line_items = [it for it in first_row_items if it.y >= first_hline_td]
+            
+            # 수평선 위 아이템만 있고 아래 아이템이 없으면 → 본문, 제거
+            if above_line_items and not below_line_items:
+                cells = [c for c in cells if c.row > 0]
+                for c in cells:
+                    c.row -= 1
+                num_rows -= 1
+    
+    # 후처리 2: 마지막 행이 이전 행과 텍스트 포함(중복) 관계이면 제거
+    if num_rows >= 2:
+        last_row_cells = [c for c in cells if c.row == num_rows - 1]
+        prev_row_cells = [c for c in cells if c.row == num_rows - 2]
+        
+        last_texts = set()
+        for c in last_row_cells:
+            for word in c.text.strip().split():
+                if word:
+                    last_texts.add(word)
+        
+        prev_texts = set()
+        for c in prev_row_cells:
+            for word in c.text.strip().split():
+                if word:
+                    prev_texts.add(word)
+        
+        # 마지막 행의 단어 80%+ 가 이전 행에 이미 포함되면 중복
+        if last_texts and prev_texts:
+            overlap = len(last_texts & prev_texts) / len(last_texts)
+            if overlap >= 0.8:
+                cells = [c for c in cells if c.row < num_rows - 1]
+                num_rows -= 1
+    
+    # 후처리 결과 반영
+    table.cells = cells
+    table.rows = num_rows
     
     # 유효성 검증
     non_empty = sum(1 for c in cells if c.text.strip())
